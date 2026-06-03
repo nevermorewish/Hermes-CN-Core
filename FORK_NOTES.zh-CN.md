@@ -19,6 +19,7 @@
 | **P-009** | `hermes_cli/web_server.py`, `tui_gateway/sse.py` | 增加 `/api/v2/events` SSE 和 `/api/v2/rpc` POST transport | desktop-v2 默认使用 EventSource + POST，减少 WebSocket 兼容问题 | 可考虑上游 |
 | **P-010** | `hermes_cli/config.py` | 注册 `LONGCAT_API_KEY` | CN 模型设置需要 LongCat 密钥入口 | CN 专属，除非上游支持 LongCat |
 | **P-011** | `tui_gateway/server.py` | 给 `model.options` 增加 `slug_filter`，并增加 `provider.probe` RPC | desktop-v2 需要过滤模型选择器，并轻量探测 provider 状态 | 可考虑上游 |
+| **P-012** | `hermes_cli/main.py` | `_model_flow_anthropic()` 支持保留或自定义 `base_url`，不再无条件删除 | 使用 Anthropic 兼容代理或私有端点的用户需要在模型设置流程中保留自定义 `base_url` | 建议上游 |
 
 ## 发布和维护支撑
 
@@ -196,6 +197,24 @@
 **风险和约束**：`provider.probe` 不应返回密钥、原始配置或敏感错误细节。
 
 **是否上游**：可以考虑，但需要先审定 probe 的返回结构和错误语义。
+
+---
+
+### P-012：`_model_flow_anthropic()` 支持可选自定义 `base_url`
+
+**现象**：在交互式添加 Anthropic 模型时，代码无条件执行 `model.pop("base_url", None)`，导致任何预配置或期望的自定义 `base_url` 被静默丢弃。
+
+**原因**：`_model_flow_anthropic()` 原本假设所有 Anthropic 请求都应走官方 `https://api.anthropic.com`，未考虑使用兼容代理、OpenRouter 或私有端点的场景。
+
+**改动**：
+- 移除无条件的 `model.pop("base_url", None)`。
+- 在模型选择后增加交互式提示，显示当前 `base_url`（默认 `https://api.anthropic.com`）。
+- 用户输入自定义地址则保存到 `model["base_url"]`。
+- 用户直接回车则保留已有 `base_url`；仅在原本不存在时才将其移除，让运行时回退到硬编码的官方地址。
+
+**风险和约束**：无。`runtime_provider.py` 对 `anthropic` provider 已使用 `model_cfg.get("base_url")` 读取配置，无需额外运行时改动。
+
+**是否上游**：建议上游。该改动向后兼容，且能支持合法的第三方 Anthropic 兼容端点场景。
 
 ---
 
