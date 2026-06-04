@@ -6,7 +6,7 @@ English · [简体中文](./README.zh-CN.md)
 [![Runtime Release](https://github.com/Eynzof/hermes-agent-cn/actions/workflows/release-runtime.yml/badge.svg)](https://github.com/Eynzof/hermes-agent-cn/actions/workflows/release-runtime.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
 
-`hermes-agent-cn` is a Chinese community fork of [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent). It tracks upstream while carrying a small, documented patch set for Chinese provider metadata, the Hermes desktop runtime, and Dashboard APIs used by [hermes-cn-desktop-v2](https://github.com/Eynzof/hermes-cn-desktop-v2).
+`hermes-agent-cn` is a Chinese community fork of [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent). It tracks upstream while carrying a small, documented patch set for Chinese provider metadata, the Hermes desktop runtime, and Dashboard APIs used by [hermes-agent-cn-desktop](https://github.com/Eynzof/hermes-agent-cn-desktop).
 
 This repository is not a clean-room reimplementation of Hermes Agent. It is a long-lived downstream fork that keeps upstream attribution, upstream licensing, and a clear maintenance path back to `NousResearch/hermes-agent`.
 
@@ -27,14 +27,14 @@ The fork-specific changes are documented in [FORK_NOTES.md](./FORK_NOTES.md). In
 - **Chinese provider metadata** for Dashboard environment configuration, including ARK, Qianfan, Hunyuan, SiliconFlow, ModelScope, AI302, CompShare, and LongCat.
 - **Dashboard endpoints used by the desktop client**, such as attachment uploads, workspace directory listing, MCP server summaries, and active profile read/write APIs.
 - **SSE + POST gateway transport** for browser and desktop shells that prefer EventSource plus HTTP JSON-RPC over WebSocket-only transport.
-- **Runtime release packaging** that builds signed PyInstaller artifacts consumed by `hermes-cn-desktop-v2`.
+- **Runtime release packaging** that builds signed PyInstaller artifacts consumed by `hermes-agent-cn-desktop`.
 - **Fork maintenance automation** for upstream tracking, runtime release signing, lockfile checks, and supply-chain scanning.
 
 If you want the official upstream project, use [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent). If you want the Chinese community fork or the desktop runtime consumed by the CN desktop app, use this repository.
 
 ## Relationship to the desktop app
 
-`hermes-agent-cn` is the runtime and Dashboard backend used by [Hermes Agent CN Desktop](https://github.com/Eynzof/hermes-cn-desktop-v2). The desktop app downloads signed runtime artifacts from this repository's GitHub Releases and runs the Dashboard locally.
+`hermes-agent-cn` is the runtime and Dashboard backend used by [Hermes Agent CN Desktop](https://github.com/Eynzof/hermes-agent-cn-desktop). The desktop app downloads signed runtime artifacts from this repository's GitHub Releases and runs the Dashboard locally.
 
 Current runtime release:
 
@@ -70,7 +70,7 @@ Then start Hermes:
 hermes
 ```
 
-For desktop users, the recommended path is to install the desktop client from [hermes-cn-desktop-v2 releases](https://github.com/Eynzof/hermes-cn-desktop-v2/releases). The desktop app manages the runtime for you.
+For desktop users, the recommended path is to install the desktop client from [hermes-agent-cn-desktop releases](https://github.com/Eynzof/hermes-agent-cn-desktop/releases). The desktop app manages the runtime for you.
 
 ## Quick start
 
@@ -102,7 +102,7 @@ One command from a fresh install:
 hermes setup --portal
 ```
 
-That logs you in via OAuth, sets Nous as your provider, and turns on the Tool Gateway. Check what's wired up any time with `hermes portal status`. Full details on the [Tool Gateway docs page](https://hermes-agent.nousresearch.com/docs/user-guide/features/tool-gateway).
+That logs you in via OAuth, sets Nous as your provider, and turns on the Tool Gateway. Check what's wired up any time with `hermes portal info`. Full details on the [Tool Gateway docs page](https://hermes-agent.nousresearch.com/docs/user-guide/features/tool-gateway).
 
 You can still bring your own keys per-tool whenever you want — the gateway is per-backend, not all-or-nothing.
 
@@ -112,17 +112,17 @@ You can still bring your own keys per-tool whenever you want — the gateway is 
 
 Hermes has two entry points: start the terminal UI with `hermes`, or run the gateway and talk to it from Telegram, Discord, Slack, WhatsApp, Signal, or Email. Once you're in a conversation, many slash commands are shared across both interfaces.
 
-| Action | CLI | Messaging platforms |
-|---------|-----|---------------------|
-| Start chatting | `hermes` | Run `hermes gateway setup` + `hermes gateway start`, then send the bot a message |
-| Start fresh conversation | `/new` or `/reset` | `/new` or `/reset` |
-| Change model | `/model [provider:model]` | `/model [provider:model]` |
-| Set a personality | `/personality [name]` | `/personality [name]` |
-| Retry or undo the last turn | `/retry`, `/undo` | `/retry`, `/undo` |
-| Compress context / check usage | `/compress`, `/usage`, `/insights [--days N]` | `/compress`, `/usage`, `/insights [days]` |
-| Browse skills | `/skills` or `/<skill-name>` | `/<skill-name>` |
-| Interrupt current work | `Ctrl+C` or send a new message | `/stop` or send a new message |
-| Platform-specific status | `/platforms` | `/status`, `/sethome` |
+| Action                         | CLI                                           | Messaging platforms                                                              |
+| ------------------------------ | --------------------------------------------- | -------------------------------------------------------------------------------- |
+| Start chatting                 | `hermes`                                      | Run `hermes gateway setup` + `hermes gateway start`, then send the bot a message |
+| Start fresh conversation       | `/new` or `/reset`                            | `/new` or `/reset`                                                               |
+| Change model                   | `/model [provider:model]`                     | `/model [provider:model]`                                                        |
+| Set a personality              | `/personality [name]`                         | `/personality [name]`                                                            |
+| Retry or undo the last turn    | `/retry`, `/undo`                             | `/retry`, `/undo`                                                                |
+| Compress context / check usage | `/compress`, `/usage`, `/insights [--days N]` | `/compress`, `/usage`, `/insights [days]`                                        |
+| Browse skills                  | `/skills` or `/<skill-name>`                  | `/<skill-name>`                                                                  |
+| Interrupt current work         | `Ctrl+C` or send a new message                | `/stop` or send a new message                                                    |
+| Platform-specific status       | `/platforms`                                  | `/status`, `/sethome`                                                            |
 
 For the full command lists, see the [CLI guide](https://hermes-agent.nousresearch.com/docs/user-guide/cli) and the [Messaging Gateway guide](https://hermes-agent.nousresearch.com/docs/user-guide/messaging).
 

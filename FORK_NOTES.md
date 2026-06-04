@@ -9,13 +9,13 @@ This document explains the fork-specific changes on `main` that diverge from ups
 | **P-002** | `hermes_cli/web_server.py` | Adds `POST /api/upload` for dashboard attachment uploads | v2 web composer's drag-to-upload depends on it; upstream had it once (`e7c3cd772`) then reverted | Not in upstream |
 | **P-003** | `hermes_cli/web_server.py` | Drops the `_DASHBOARD_EMBEDDED_CHAT_ENABLED` gate on `/api/ws` | v2 runs `hermes dashboard` without `--tui`, the gate would close gateway WS | Not in upstream |
 | **P-004** | `hermes_cli/web_server.py` | Adds `GET /api/fs/list` for the v2 web workspace picker | v2 `/new` task page browses directories instead of `window.prompt()` for path; restricted to user home subtree | Not in upstream |
-| **P-005** | `hermes_cli/web_server.py` | Adds `GET /api/mcp-servers` (read-only list) | v2 panel "健康检查" cell needs MCP count without leaking command/args/env (which embed secrets) | Not in upstream |
+| **P-005** | `hermes_cli/web_server.py` | Adds `GET /api/mcp-servers` (read-only `{summary, servers:[{name,enabled}]}`) — handler `list_mcp_servers_summary` | v2 panel "健康检查" cell needs MCP count without leaking command/args/env (which embed secrets) | Distinct from upstream's `/api/mcp/servers` (exposes url/command/args); fork handler renamed in 2026-06-04 sync to avoid an operationId clash |
 | **P-006** | `hermes_cli/config.py` | Registers `OPTIONAL_ENV_VARS` for CN providers (ARK / QIANFAN / HUNYUAN / SILICONFLOW / MODELSCOPE / AI302 / COMPSHARE) | Dashboard env panel is metadata-driven; upstream only knows global providers (OpenAI / Anthropic / Google / DeepSeek) | Won't be upstreamed (CN-specific) |
-| **P-007** | `tui_gateway/ws.py` | Wraps the dispatch handler in a try/except that logs traceback + returns a JSON-RPC error response instead of silently closing the WS | Without this, any unhandled handler exception or json.dumps serialization failure shows up in the client as "WebSocket closed" with zero diagnostic context | Should be upstreamed |
-| **P-008** | `hermes_cli/web_server.py` | Adds `GET/PUT /api/profiles/active` (sticky active-profile getter/setter) | Upstream has list/create/delete/rename/SOUL but no symmetric active getter/setter — v2 web profile switcher needs HTTP access to this | Should be upstreamed |
-| **P-009** | `hermes_cli/web_server.py`, `tui_gateway/sse.py` | Adds SSE+POST gateway transport at `/api/v2/events` and `/api/v2/rpc` | desktop-v2 uses EventSource for streaming and POST for JSON-RPC to avoid WebSocket edge cases in packaged desktop runtimes | Maybe upstream |
+| ~~**P-007**~~ | `tui_gateway/ws.py` | ~~Wraps the dispatch handler in a try/except that logs traceback + returns a JSON-RPC error response instead of silently closing the WS~~ | Without this, any unhandled handler exception or json.dumps serialization failure shows up in the client as "WebSocket closed" with zero diagnostic context | **Superseded by upstream** — dropped in 2026-06-04 sync |
+| **P-008** | `hermes_cli/web_server.py` | ~~Adds `GET/PUT /api/profiles/active`~~ → upstream shipped its own `GET/POST /api/profiles/active`; fork now keeps only a **compat layer**: adds `name` to the GET response (desktop reads `.name`) + a `PUT` alias (desktop sets via PUT) | v2 web profile switcher reads `.name` and writes via `PUT`; upstream returns `{active,current}` and only has `POST` | **Upstreamed (GET/POST)** + fork compat (2026-06-04 sync) |
+| **P-009** | `hermes_cli/web_server.py`, `tui_gateway/sse.py` | Adds SSE+POST gateway transport at `/api/v2/events` and `/api/v2/rpc` | desktop uses EventSource for streaming and POST for JSON-RPC to avoid WebSocket edge cases in packaged desktop runtimes | Maybe upstream |
 | **P-010** | `hermes_cli/config.py` | Registers `LONGCAT_API_KEY` in `OPTIONAL_ENV_VARS` | CN model settings need first-class LongCat credentials in the env panel | Won't be upstreamed unless upstream adopts LongCat |
-| **P-011** | `tui_gateway/server.py` | Adds `slug_filter` to `model.options` and `provider.probe` RPC | desktop-v2 needs filtered model picker options and a lightweight provider health probe | Maybe upstream |
+| **P-011** | `tui_gateway/server.py` | Adds `slug_filter` to `model.options` and `provider.probe` RPC | desktop needs filtered model picker options and a lightweight provider health probe | Maybe upstream |
 | **P-012** | `hermes_cli/main.py` | `_model_flow_anthropic()` prompts for optional custom `base_url` instead of unconditionally removing it | Users running Anthropic-compatible proxies or alternative endpoints need to preserve a custom `base_url` during model setup | Should be upstreamed |
 | **P-013** | `model_tools.py`, `tests/run_agent/test_repair_tool_arg_keys.py` | Adds automatic tool argument key repair (`repair_tool_arg_keys`) with alias tables, per-tool overrides, fuzzy fallback, nested object/array recursion, and an optional callback hook; integrated into `handle_function_call` before type coercion | LLMs often misname arguments (e.g. "file"→"path", "cmd"→"command"); this makes tool dispatch resilient to common drift without weakening JSON Schemas | Should be upstreamed |
 
@@ -28,7 +28,7 @@ These are fork maintenance changes, not runtime behavior patches:
 | Area | Target file | What it does |
 |---|---|---|
 | Upstream sync | `scripts/sync-upstream.sh`, `.github/workflows/upstream-watch.yml`, `MAINTAINING.md` | Keeps upstream syncs on temporary PR branches instead of merging directly into `main` |
-| Managed runtime | `.github/workflows/release-runtime.yml`, `scripts/sign_runtime_manifest.py`, `docs/RUNTIME_RELEASES.md` | Builds PyInstaller runtime artifacts, signs manifests, and publishes GitHub Releases consumed by desktop-v2 |
+| Managed runtime | `.github/workflows/release-runtime.yml`, `scripts/sign_runtime_manifest.py`, `docs/RUNTIME_RELEASES.md` | Builds PyInstaller runtime artifacts, signs manifests, and publishes GitHub Releases consumed by desktop |
 
 ## Per-patch detail
 
@@ -97,7 +97,7 @@ Plus a 5000-entry cap to bound responses on huge directories.
 
 **Side effects**: None. Read-only.
 
-**Should we upstream?** Yes. Other dashboard frontends would benefit too.
+**Should we upstream?** Upstream added a *different* `/api/mcp/servers` (slash) in the 2026-06-04 sync that returns full per-server config (url/command/args, env redacted). The fork keeps `/api/mcp-servers` (hyphen) with the minimal `{name, enabled}` shape the desktop health-check expects; the handler was renamed `list_mcp_servers_summary` so the two endpoints don't collide on the generated OpenAPI operationId.
 
 ---
 
@@ -129,7 +129,7 @@ Plus a 5000-entry cap to bound responses on huge directories.
 
 **Side effects**: Log file grows on dispatch crashes (rotate via standard logrotate if needed). Error responses use a non-standard error code; clients should treat -32000 as a generic server error.
 
-**Should we upstream?** Definitely. Pure observability improvement, no behavior change in the happy path.
+**Should we upstream?** Done — as of the 2026-06-04 upstream sync, upstream ships equivalent dispatch-exception handling (try/except around `dispatch`, a JSON-RPC `-32603` "internal error" response, structured `dispatch_crashes` logging via `_log.exception`, and the connection kept alive for subsequent calls). The fork implementation — including the dedicated `~/.hermes/logs/dispatch_exceptions.log` file and the `-32000` error code — was dropped in favor of upstream's version, which the merged `handle_ws` observability counters already depend on. The standard hermes log now captures the traceback.
 
 ---
 
@@ -145,17 +145,17 @@ Plus a 5000-entry cap to bound responses on huge directories.
 
 **Side effects**: None. File-backed sticky preference, mirroring `hermes profile use <name>` CLI behavior.
 
-**Should we upstream?** Yes — the symmetry gap is small and obvious. PR is straightforward.
+**Should we upstream?** Done — upstream shipped `GET/POST /api/profiles/active` in the 2026-06-04 sync (GET returns `{active, current}`; POST sets via `ProfileActiveUpdate`). The fork's standalone GET/PUT were removed to avoid a duplicate route. To keep the existing desktop client working without a coordinated release, two minimal compat shims now ride on upstream's endpoint: the GET response also carries `name` (= `active`; the desktop's `useActiveProfile` reads `.name`), and a `@app.put("/api/profiles/active")` alias is stacked on the setter (the desktop sets via `PUT`). Both can be dropped once the desktop migrates to `{active,current}` + `POST`.
 
 ---
 
 ### P-009: SSE+POST gateway transport
 
-**Symptom**: desktop-v2's packaged runtime needs a stable browser-friendly
+**Symptom**: desktop's packaged runtime needs a stable browser-friendly
 streaming transport. Relying only on `/api/ws` makes failures harder to
 debug and interacts poorly with some desktop shell/network setups.
 
-**Root cause**: Upstream exposes the TUI gateway over WebSocket. desktop-v2
+**Root cause**: Upstream exposes the TUI gateway over WebSocket. desktop
 wants EventSource for server-to-client events and normal HTTP POST for
 client-to-server JSON-RPC.
 
@@ -190,7 +190,7 @@ does not include this CN-specific key.
 
 ### P-011: Gateway model filtering and provider probe
 
-**Symptom**: desktop-v2 needs to filter model picker options by provider
+**Symptom**: desktop needs to filter model picker options by provider
 slug and run a lightweight provider health check without starting a full
 agent turn.
 
