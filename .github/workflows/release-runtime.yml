@@ -57,9 +57,10 @@ jobs:
             platform: darwin
             arch: arm64
             ext: ""
-          # Intel macOS runtime is intentionally omitted from the default
-          # release matrix so scarce macos-13 runner availability cannot block
-          # publishing win32-x64 and darwin-arm64 desktop runtimes.
+          - runner: macos-15-intel
+            platform: darwin
+            arch: x64
+            ext: ""
           - runner: ubuntu-latest
             platform: linux
             arch: x64
