@@ -400,6 +400,14 @@ def _find_bash() -> str:
         "it is the WSL launcher, not Git Bash."
     )
 
+def _find_pwsh_simple() -> str | None:
+    """Return powershell.exe path from PATH, or None."""
+    if not _IS_WINDOWS:
+        return None
+    pwsh = shutil.which("pwsh") or shutil.which("pwsh.exe")
+    if pwsh:
+        return pwsh
+    return shutil.which("powershell") or shutil.which("powershell.exe")
 
 def _resolve_shell() -> tuple[str, str]:
     """Determine which shell to use for local command execution.
@@ -424,25 +432,10 @@ def _resolve_shell() -> tuple[str, str]:
             logger.info("Using pwsh from HERMES_PWSH_PATH: %s", explicit_pwsh)
             return ("pwsh", explicit_pwsh)
 
-        # Try discovery (with auto-install fallback)
-        try:
-            global _find_pwsh
-            if _find_pwsh is None:
-                from tools.environments._find_pwsh import find_pwsh as _fp
-                _find_pwsh = _fp
-            pwsh_path = _find_pwsh()
-            if pwsh_path:
-                logger.info("Selected shell: pwsh at %s", pwsh_path)
-                return ("pwsh", pwsh_path)
-        except Exception as exc:
-            logger.debug("pwsh discovery failed: %s", exc)
-
-        if shell_type == "pwsh":
-            raise RuntimeError(
-                "HERMES_SHELL_TYPE=pwsh but PowerShell 7 could not be found. "
-                "Set HERMES_PWSH_PATH or install PowerShell 7."
-            )
-
+        pwsh_path = _find_pwsh_simple()
+        if pwsh_path:
+            logger.info("Selected shell: powershell at %s", pwsh_path)
+            return ("pwsh", pwsh_path)
     # Fall back to bash
     bash_path = _find_bash()
     if bash_path:
@@ -676,7 +669,7 @@ class LocalEnvironment(BaseEnvironment):
         Uses ``-NoProfile`` for speed (profile loading is slow in pwsh).
         Windows paths are handled natively — no backslash conversion needed.
         """
-        args = [self._shell_path, "-NoProfile", "-Command", cmd_string]
+        args = [self._shell_path, "-NoP", "-Exec", "Bypass", "-NoL", "-C", cmd_string]
         run_env = _make_run_env(self.env)
         safe_cwd = _resolve_safe_cwd(self.cwd)
         if safe_cwd != self.cwd:

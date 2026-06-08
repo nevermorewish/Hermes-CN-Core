@@ -64,9 +64,7 @@ For native Windows testing, the repository also includes the PowerShell installe
 iex (irm https://raw.githubusercontent.com/Eynzof/hermes-agent-cn/main/scripts/install.ps1)
 ```
 
-The installer handles everything: uv, Python 3.11, Node.js, ripgrep, ffmpeg, **and a portable Git Bash** (MinGit, unpacked to `%LOCALAPPDATA%\hermes\git` — no admin required, completely isolated from any system Git install). Hermes uses this bundled Git Bash to run shell commands.
-
-If you already have Git installed, the installer detects it and uses that instead. Otherwise a ~45MB MinGit download is all you need — it won't touch or interfere with any system Git.
+The installer handles: uv, Python 3.11, Node.js, ripgrep, ffmpeg, the repo clone, virtual environment, and `hermes` command setup.
 
 > **Android / Termux:** The tested manual path is documented in the [Termux guide](https://hermes-agent.nousresearch.com/docs/getting-started/termux). On Termux, Hermes installs a curated `.[termux]` extra because the full `.[all]` extra currently pulls Android-incompatible voice dependencies.
 >
