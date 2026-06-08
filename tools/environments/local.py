@@ -13,6 +13,7 @@ from pathlib import Path
 
 from tools.environments.base import BaseEnvironment, _pipe_stdin
 from tools.environments._process_bash_command import _prepare_bash_cmd
+from tools.environments.proccess_pwsh import pwsh_transform
 from hermes_cli._subprocess_compat import windows_hide_flags
 
 _IS_WINDOWS = platform.system() == "Windows"
@@ -669,6 +670,10 @@ class LocalEnvironment(BaseEnvironment):
         Uses ``-NoProfile`` for speed (profile loading is slow in pwsh).
         Windows paths are handled natively — no backslash conversion needed.
         """
+        # Windows PowerShell 5.1 doesn't understand PowerShell 7.x syntax
+        # (ternary, ??, ??=, &&, ||, ?., ?[).  Down-level when necessary.
+        if os.path.basename(self._shell_path).lower().startswith("powershell"):
+            cmd_string = pwsh_transform(cmd_string)
         args = [self._shell_path, "-NoP", "-Exec", "Bypass", "-NoL", "-C", cmd_string]
         run_env = _make_run_env(self.env)
         safe_cwd = _resolve_safe_cwd(self.cwd)
@@ -717,6 +722,10 @@ class LocalEnvironment(BaseEnvironment):
           ``$?``      → ``$LASTEXITCODE``
           ``pwd -P``  → ``Get-Location``
         """
+        # Down-level PowerShell 7.x syntax (ternary, ??, ??=, &&, ||, ?., ?[)
+        # to PowerShell 5.1 compatible syntax before wrapping.
+        command = pwsh_transform(command)
+
         # Escape single quotes for PowerShell: double them
         escaped = command.replace("'", "''")
         quoted_cwd = cwd.replace("'", "''")
