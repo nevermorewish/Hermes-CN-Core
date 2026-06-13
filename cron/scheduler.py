@@ -280,14 +280,10 @@ def _lock_holder_alive(lock_file) -> bool:
         import psutil
         return psutil.pid_exists(pid)
     except Exception:
-        # psutil unavailable/errored — fall back to a POSIX signal-0 probe.
-        try:
-            os.kill(pid, 0)
-            return True
-        except ProcessLookupError:
-            return False
-        except OSError:
-            return True
+        # Can't determine liveness (psutil missing/errored) — assume the holder
+        # is alive so we never steal a lock we're unsure about.  psutil is a
+        # pinned core dependency, so this path is effectively unreachable.
+        return True
 
 
 @contextmanager
