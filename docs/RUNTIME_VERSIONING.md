@@ -43,7 +43,7 @@ ship `0.14.0-cn.2`, `0.14.0-cn.3`, and so on. When the kernel moves to
 Every release asset set includes one manifest per platform at:
 
 ```text
-https://github.com/Eynzof/hermes-agent-cn/releases/latest/download/stable-<platform>-<arch>.json
+https://ai.fengchiyun.com/downloads/Hermes-CN-Core/runtime/stable/stable-<platform>-<arch>.json
 ```
 
 The manifest is intentionally flat so GitHub Releases can host it directly.
@@ -60,7 +60,7 @@ must reject anything that is not `schemaVersion: 2`.
   "runtimeRevision": 1,
   "platform": "darwin",
   "arch": "arm64",
-  "artifactUrl": "https://github.com/Eynzof/hermes-agent-cn/releases/download/runtime-v0.14.0-cn.1/hermes-agent-cn-runtime-darwin-arm64.zip",
+  "artifactUrl": "https://ai.fengchiyun.com/downloads/Hermes-CN-Core/runtime/releases/0.14.0-cn.1/hermes-agent-cn-runtime-darwin-arm64.zip",
   "sha256": "...",
   "signature": "...",
   "sourceRepo": "Eynzof/hermes-agent-cn",
@@ -108,6 +108,7 @@ Any change to that order must be made in both
 4. The `release-runtime` workflow validates that the tag's `kernelVersion`
    matches `pyproject.toml`, builds the platform runtimes, normalizes and
    Developer ID signs the macOS payload, writes schema v2 manifests, signs
-   them, and publishes all assets to the GitHub Release.
+   them, publishes all assets to the GitHub Release, and uploads the public
+   runtime update feed to the Linux download server.
 
 Do not reuse a tag for a rebuilt runtime. Publish a new `cn.N` revision instead.

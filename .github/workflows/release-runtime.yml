@@ -3,14 +3,17 @@
 #
 # Trigger: push a tag matching `runtime-v*-cn.*` (e.g. `runtime-v0.14.0-cn.1`).
 # Per-platform jobs build a self-contained executable via PyInstaller,
-# zip it, sign the manifest with Ed25519, and attach all artifacts to a
-# GitHub Release.
+# zip it, sign the manifest with Ed25519, attach all artifacts to a GitHub
+# Release, and upload the runtime update feed to the configured Linux server.
 #
 # Required repository secrets:
 #   RUNTIME_SIGN_PRIVATE_KEY_PEM
 #     The Ed25519 PEM-encoded private key. The matching public key is
 #     baked into the desktop binary via the HERMES_RUNTIME_UPDATE_PUBLIC_KEY_PEM_DEFAULT
 #     env var at build time. See docs/RUNTIME_RELEASES.md.
+#   LINUX_DEPLOY_KEY
+#     SSH private key used to upload runtime artifacts to the public download
+#     server. LINUX_DEPLOY_HOST/PORT/USER/PATH can be repository secrets or vars.
 #   APPLE_CERTIFICATE / APPLE_CERTIFICATE_PASSWORD / APPLE_SIGNING_IDENTITY
 #     Developer ID Application signing material for macOS runtime payloads.
 #
@@ -39,9 +42,16 @@ on:
         default: stable
         type: choice
         options: [stable, beta, canary]
+      remote_path:
+        description: "Linux server download root. Use /www/wwwroot/downloads, or leave empty to use LINUX_DEPLOY_PATH."
+        required: false
+        default: ""
 
 permissions:
   contents: write  # needed to create the Release + upload assets
+
+env:
+  RUNTIME_UPDATE_FEED_BASE_URL: https://ai.fengchiyun.com/downloads/Hermes-CN-Core/runtime
 
 jobs:
   build:
@@ -380,7 +390,8 @@ jobs:
           NAME="hermes-agent-cn-runtime-${{ matrix.platform }}-${{ matrix.arch }}"
           # Anticipate the URL the Release will publish at — this has to
           # match exactly because the signature covers it.
-          URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/${NAME}.zip"
+          FEED_BASE="${RUNTIME_UPDATE_FEED_BASE_URL%/}"
+          URL="${FEED_BASE}/releases/${{ steps.meta.outputs.runtime_version }}/${NAME}.zip"
           python scripts/sign_runtime_manifest.py \
             --channel "${{ steps.meta.outputs.channel }}" \
             --runtime-version "${{ steps.meta.outputs.runtime_version }}" \
@@ -425,3 +436,158 @@ jobs:
           draft: false
           prerelease: ${{ contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}
         if: startsWith(github.ref, 'refs/tags/runtime-v')
+
+      - name: Configure SSH for Linux upload
+        env:
+          SECRET_LINUX_DEPLOY_HOST: ${{ secrets.LINUX_DEPLOY_HOST }}
+          SECRET_LINUX_DEPLOY_PORT: ${{ secrets.LINUX_DEPLOY_PORT }}
+          SECRET_LINUX_DEPLOY_USER: ${{ secrets.LINUX_DEPLOY_USER }}
+          VAR_LINUX_DEPLOY_HOST: ${{ vars.LINUX_DEPLOY_HOST }}
+          VAR_LINUX_DEPLOY_PORT: ${{ vars.LINUX_DEPLOY_PORT }}
+          VAR_LINUX_DEPLOY_USER: ${{ vars.LINUX_DEPLOY_USER }}
+          LINUX_DEPLOY_KEY: ${{ secrets.LINUX_DEPLOY_KEY }}
+          LINUX_DEPLOY_KNOWN_HOSTS: ${{ secrets.LINUX_DEPLOY_KNOWN_HOSTS }}
+          SECRET_LINUX_DEPLOY_PATH: ${{ secrets.LINUX_DEPLOY_PATH }}
+          VAR_LINUX_DEPLOY_PATH: ${{ vars.LINUX_DEPLOY_PATH }}
+          INPUT_REMOTE_PATH: ${{ github.event.inputs.remote_path }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          deploy_host="${SECRET_LINUX_DEPLOY_HOST:-${VAR_LINUX_DEPLOY_HOST:-}}"
+          deploy_port="${SECRET_LINUX_DEPLOY_PORT:-${VAR_LINUX_DEPLOY_PORT:-22}}"
+          deploy_user="${SECRET_LINUX_DEPLOY_USER:-${VAR_LINUX_DEPLOY_USER:-root}}"
+          configured_remote_path="${SECRET_LINUX_DEPLOY_PATH:-${VAR_LINUX_DEPLOY_PATH:-}}"
+          remote_path="${INPUT_REMOTE_PATH:-$configured_remote_path}"
+
+          if [[ -z "$deploy_host" ]]; then
+            deploy_host="43.224.248.112"
+          fi
+          if [[ -z "${LINUX_DEPLOY_KEY:-}" ]]; then
+            echo "Missing Linux upload configuration: secrets.LINUX_DEPLOY_KEY" >&2
+            exit 1
+          fi
+          if [[ -z "$remote_path" ]]; then
+            echo "Missing Linux upload configuration: workflow input remote_path, secrets.LINUX_DEPLOY_PATH, or vars.LINUX_DEPLOY_PATH" >&2
+            exit 1
+          fi
+
+          mkdir -p "$HOME/.ssh"
+          key_path="$HOME/.ssh/linux_deploy_key"
+          printf '%s' "$LINUX_DEPLOY_KEY" | sed 's/\r$//' > "$key_path"
+          chmod 600 "$key_path"
+
+          known_hosts_path="$HOME/.ssh/known_hosts"
+          if [[ -z "${LINUX_DEPLOY_KNOWN_HOSTS:-}" ]]; then
+            touch "$known_hosts_path"
+            strict_host_key_checking="accept-new"
+          else
+            printf '%s' "$LINUX_DEPLOY_KNOWN_HOSTS" | sed 's/\r$//' > "$known_hosts_path"
+            strict_host_key_checking="yes"
+          fi
+
+          {
+            echo "SSH_KEY_PATH=$key_path"
+            echo "SSH_KNOWN_HOSTS_PATH=$known_hosts_path"
+            echo "SSH_STRICT_HOST_KEY_CHECKING=$strict_host_key_checking"
+            echo "LINUX_DEPLOY_HOST=$deploy_host"
+            echo "LINUX_DEPLOY_PORT=$deploy_port"
+            echo "LINUX_DEPLOY_USER=$deploy_user"
+            echo "LINUX_DEPLOY_REMOTE_PATH=${remote_path%/}"
+          } >> "$GITHUB_ENV"
+
+      - name: Upload runtime feed to Linux server
+        env:
+          RUNTIME_VERSION_INPUT: ${{ github.event.inputs.version }}
+          CHANNEL_INPUT: ${{ github.event.inputs.channel }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          quote_remote_path() {
+            python -c 'import shlex, sys; print(shlex.quote(sys.argv[1]))' "$1"
+          }
+
+          remote_upload() {
+            local file_path="$1"
+            local remote_directory="$2"
+            local label="$3"
+            local attempt=1
+            while [[ "$attempt" -le 3 ]]; do
+              echo "Uploading $label attempt $attempt/3: $file_path"
+              if scp \
+                -i "$SSH_KEY_PATH" \
+                -P "$LINUX_DEPLOY_PORT" \
+                -o "UserKnownHostsFile=$SSH_KNOWN_HOSTS_PATH" \
+                -o "StrictHostKeyChecking=$SSH_STRICT_HOST_KEY_CHECKING" \
+                -o "ConnectTimeout=30" \
+                -o "ServerAliveInterval=30" \
+                -o "ServerAliveCountMax=10" \
+                "$file_path" "${LINUX_DEPLOY_USER}@${LINUX_DEPLOY_HOST}:${remote_directory}/"; then
+                return 0
+              fi
+              if [[ "$attempt" -eq 3 ]]; then
+                echo "Failed to upload $label file after 3 attempts: $file_path" >&2
+                return 1
+              fi
+              sleep $((10 * attempt))
+              attempt=$((attempt + 1))
+            done
+          }
+
+          if [[ -n "${RUNTIME_VERSION_INPUT:-}" ]]; then
+            runtime_version="$RUNTIME_VERSION_INPUT"
+            channel="${CHANNEL_INPUT:-stable}"
+          else
+            runtime_version="${GITHUB_REF_NAME#runtime-v}"
+            channel="stable"
+          fi
+
+          feed_path="$(python - <<'PY'
+          import os
+          from urllib.parse import urlparse
+
+          print(urlparse(os.environ["RUNTIME_UPDATE_FEED_BASE_URL"]).path.strip("/"))
+          PY
+          )"
+          remote_root="${LINUX_DEPLOY_REMOTE_PATH%/}"
+          destination_root="$remote_root"
+          if [[ -n "$feed_path" ]]; then
+            first_segment="${feed_path%%/*}"
+            if [[ "$remote_root" == */"$feed_path" ]]; then
+              destination_root="$remote_root"
+            elif [[ "$feed_path" == */* && "$(basename "$remote_root")" == "$first_segment" ]]; then
+              destination_root="$remote_root/${feed_path#*/}"
+            elif [[ "$feed_path" != */* && "$(basename "$remote_root")" == "$feed_path" ]]; then
+              destination_root="$remote_root"
+            else
+              destination_root="$remote_root/$feed_path"
+            fi
+          fi
+
+          channel_destination="$destination_root/$channel"
+          archive_destination="$destination_root/releases/$runtime_version"
+          remote="${LINUX_DEPLOY_USER}@${LINUX_DEPLOY_HOST}"
+          ssh \
+            -i "$SSH_KEY_PATH" \
+            -p "$LINUX_DEPLOY_PORT" \
+            -o "UserKnownHostsFile=$SSH_KNOWN_HOSTS_PATH" \
+            -o "StrictHostKeyChecking=$SSH_STRICT_HOST_KEY_CHECKING" \
+            -o "ConnectTimeout=30" \
+            -o "ServerAliveInterval=30" \
+            -o "ServerAliveCountMax=10" \
+            "$remote" "mkdir -p $(quote_remote_path "$channel_destination") $(quote_remote_path "$archive_destination")"
+
+          mapfile -t runtime_files < <(find dist -type f \( -name '*.zip' -o -name '*.json' \) | sort)
+          if [[ "${#runtime_files[@]}" -eq 0 ]]; then
+            echo "No runtime release files found under dist/" >&2
+            exit 1
+          fi
+
+          for file in "${runtime_files[@]}"; do
+            remote_upload "$file" "$archive_destination" "runtime archive"
+            remote_upload "$file" "$channel_destination" "runtime channel"
+          done
+
+          echo "Uploaded runtime archive to ${RUNTIME_UPDATE_FEED_BASE_URL%/}/releases/$runtime_version/"
+          echo "Uploaded runtime channel manifests to ${RUNTIME_UPDATE_FEED_BASE_URL%/}/$channel/"

@@ -19,13 +19,13 @@ the base URL at `releases/latest/download` keeps the desktop on the
 newest published release automatically:
 
 ```
-https://github.com/Eynzof/hermes-agent-cn/releases/latest/download/stable-win32-x64.json
+https://ai.fengchiyun.com/downloads/Hermes-CN-Core/runtime/stable/stable-win32-x64.json
 ```
 
 Pinning to a specific tag works too:
 
 ```
-https://github.com/Eynzof/hermes-agent-cn/releases/download/runtime-v0.14.0-cn.1/stable-win32-x64.json
+https://ai.fengchiyun.com/downloads/Hermes-CN-Core/runtime/releases/0.14.0-cn.1/hermes-agent-cn-runtime-win32-x64.zip
 ```
 
 The canonical versioning contract is documented in `docs/RUNTIME_VERSIONING.md`.
