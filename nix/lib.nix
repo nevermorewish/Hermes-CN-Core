@@ -245,9 +245,9 @@ in
       if [ -n "$LINK_REPO" ] && [ -n "$LINK_SHA" ]; then
         LIB_URL="$LINK_SERVER/$LINK_REPO/blob/$LINK_SHA/$LIB_FILE#L$HASH_LINE"
         LOCK_URL="$LINK_SERVER/$LINK_REPO/blob/$LINK_SHA/$LOCK_FILE"
-        REPORT="- [\`$LIB_FILE:$HASH_LINE\`]($LIB_URL): \`$OLD_HASH\` → \`$NEW_HASH\` — lockfile: [\`$LOCK_FILE\`]($LOCK_URL)"$'\\n'
+        REPORT="- [\`$LIB_FILE:$HASH_LINE\`]($LIB_URL): \`$OLD_HASH\` → \`$NEW_HASH\` — lockfile: [\`$LOCK_FILE\`]($LOCK_URL)"
       else
-        REPORT="- \`$LIB_FILE:$HASH_LINE\`: \`$OLD_HASH\` → \`$NEW_HASH\`"$'\\n'
+        REPORT="- \`$LIB_FILE:$HASH_LINE\`: \`$OLD_HASH\` → \`$NEW_HASH\`"
       fi
 
       if [ "$MODE" = "--apply" ]; then
@@ -281,7 +281,7 @@ in
           [ "$FIXED" -eq 1 ] && echo "changed=true" || echo "changed=false"
           if [ -n "$REPORT" ]; then
             echo "report<<REPORT_EOF"
-            printf "%s" "$REPORT"
+            printf "%s\n" "$REPORT"
             echo "REPORT_EOF"
           fi
         } >> "$GITHUB_OUTPUT"
