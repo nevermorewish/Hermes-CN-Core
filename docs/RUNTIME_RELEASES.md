@@ -75,7 +75,7 @@ how the desktop verifies it (`signature_payload()` in `runtime.rs`).
 
 ```
 -----BEGIN PUBLIC KEY-----
-MCowBQYDK2VwAyEAqPkLQ4o67G2GMTgkQQQZXWwDBZM/4hqq5thSZSNhoC0=
+MCowBQYDK2VwAyEASsSMMJ+CB7YGQteH5MJcvcMW4Ib4Pq+n7pHwHm/V8ik=
 -----END PUBLIC KEY-----
 ```
 
