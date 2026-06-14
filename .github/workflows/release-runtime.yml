@@ -15,7 +15,8 @@
 #     SSH private key used to upload runtime artifacts to the public download
 #     server. LINUX_DEPLOY_HOST/PORT/USER/PATH can be repository secrets or vars.
 #   APPLE_CERTIFICATE / APPLE_CERTIFICATE_PASSWORD / APPLE_SIGNING_IDENTITY
-#     Developer ID Application signing material for macOS runtime payloads.
+#     Optional Developer ID Application signing material for macOS runtime
+#     payloads. If omitted, macOS runtime zips are published unsigned.
 #
 # Caveats (track in follow-up issues, not blockers for first run):
 #   - PyInstaller's autodetection misses lazy-imported provider SDKs
@@ -293,9 +294,13 @@ jobs:
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
-          test -n "$APPLE_CERTIFICATE"
-          test -n "$APPLE_CERTIFICATE_PASSWORD"
-          test -n "$APPLE_SIGNING_IDENTITY"
+          if [[ -z "$APPLE_CERTIFICATE" || -z "$APPLE_CERTIFICATE_PASSWORD" || -z "$APPLE_SIGNING_IDENTITY" ]]; then
+            echo "MACOS_RUNTIME_SIGNING_ENABLED=false" >> "$GITHUB_ENV"
+            echo "::notice::macOS runtime signing secrets are incomplete; publishing unsigned runtime payload"
+            exit 0
+          fi
+
+          echo "MACOS_RUNTIME_SIGNING_ENABLED=true" >> "$GITHUB_ENV"
 
           signing_keychain_password="$(uuidgen)"
           signing_keychain="$RUNNER_TEMP/hermes-runtime-signing.keychain-db"
@@ -326,6 +331,11 @@ jobs:
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
+          if [[ "${MACOS_RUNTIME_SIGNING_ENABLED:-false}" != "true" ]]; then
+            echo "::notice::Skipping macOS runtime payload signing"
+            exit 0
+          fi
+
           NAME="hermes-agent-cn-runtime-${{ matrix.platform }}-${{ matrix.arch }}"
           scripts/sign_macos_runtime_payload.sh "dist/$NAME"
 
