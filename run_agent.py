@@ -3187,6 +3187,16 @@ class AIAgent:
             f"base_url={base_url} model={model}"
         )
 
+    def _anthropic_default_headers(self) -> Optional[Dict[str, str]]:
+        headers = dict(getattr(self, "request_overrides", {}) or {}).get("headers")
+        if not isinstance(headers, dict) or not headers:
+            return None
+        return {
+            str(key): str(value)
+            for key, value in headers.items()
+            if isinstance(key, str) and key.strip() and value is not None
+        }
+
     def _openai_client_lock(self) -> threading.RLock:
         lock = getattr(self, "_client_lock", None)
         if lock is None:
@@ -3597,6 +3607,7 @@ class AIAgent:
                 new_token,
                 getattr(self, "_anthropic_base_url", None),
                 timeout=get_provider_request_timeout(self.provider, self.model),
+                default_headers=self._anthropic_default_headers(),
             )
         except Exception as exc:
             logger.warning("Failed to rebuild Anthropic client after credential refresh: %s", exc)
@@ -3668,6 +3679,7 @@ class AIAgent:
             self._anthropic_client = build_anthropic_client(
                 runtime_key, runtime_base,
                 timeout=get_provider_request_timeout(self.provider, self.model),
+                default_headers=self._anthropic_default_headers(),
             )
             self._is_anthropic_oauth = _is_oauth_token(runtime_key) if self.provider == "anthropic" else False
             self.api_key = runtime_key
@@ -3737,6 +3749,7 @@ class AIAgent:
                 getattr(self, "_anthropic_base_url", None),
                 timeout=get_provider_request_timeout(self.provider, self.model),
                 drop_context_1m_beta=_drop_1m,
+                default_headers=self._anthropic_default_headers(),
             )
 
     def _interruptible_api_call(self, api_kwargs: dict):

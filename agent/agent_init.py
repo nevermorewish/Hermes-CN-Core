@@ -154,6 +154,17 @@ def _merge_custom_provider_extra_body(agent, custom_providers: List[Dict[str, An
     agent.request_overrides = overrides
 
 
+def _anthropic_default_headers(agent) -> Dict[str, str] | None:
+    headers = dict(getattr(agent, "request_overrides", {}) or {}).get("headers")
+    if not isinstance(headers, dict) or not headers:
+        return None
+    return {
+        str(key): str(value)
+        for key, value in headers.items()
+        if isinstance(key, str) and key.strip() and value is not None
+    }
+
+
 def init_agent(
     agent,
     base_url: str = None,
@@ -679,7 +690,12 @@ def init_agent(
                 raise RuntimeError(
                     f"no API key ({_param_status}, {_env_status})"
                 )
-            agent._anthropic_client = build_anthropic_client(effective_key, base_url, timeout=_provider_timeout)
+            agent._anthropic_client = build_anthropic_client(
+                effective_key,
+                base_url,
+                timeout=_provider_timeout,
+                default_headers=_anthropic_default_headers(agent),
+            )
             # No OpenAI client needed for Anthropic mode
             agent.client = None
             agent._client_kwargs = {}

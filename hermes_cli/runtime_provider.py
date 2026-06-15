@@ -546,6 +546,12 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
                     extra_body = entry.get("extra_body")
                     if isinstance(extra_body, dict):
                         result["extra_body"] = dict(extra_body)
+                    headers = entry.get("headers")
+                    if isinstance(headers, dict):
+                        result["headers"] = dict(headers)
+                    token_id = entry.get("token_id")
+                    if isinstance(token_id, int):
+                        result["token_id"] = token_id
                     # The v11→v12 migration writes the API mode under the new
                     # ``transport`` field, but hand-edited configs may still
                     # use the legacy ``api_mode`` spelling.  Accept both —
@@ -575,6 +581,12 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
                         extra_body = entry.get("extra_body")
                         if isinstance(extra_body, dict):
                             result["extra_body"] = dict(extra_body)
+                        headers = entry.get("headers")
+                        if isinstance(headers, dict):
+                            result["headers"] = dict(headers)
+                        token_id = entry.get("token_id")
+                        if isinstance(token_id, int):
+                            result["token_id"] = token_id
                         api_mode = _parse_api_mode(entry.get("api_mode") or entry.get("transport"))
                         if api_mode:
                             result["api_mode"] = api_mode
@@ -622,6 +634,12 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
         extra_body = entry.get("extra_body")
         if isinstance(extra_body, dict):
             result["extra_body"] = dict(extra_body)
+        headers = entry.get("headers")
+        if isinstance(headers, dict):
+            result["headers"] = dict(headers)
+        token_id = entry.get("token_id")
+        if isinstance(token_id, int):
+            result["token_id"] = token_id
         api_mode = _parse_api_mode(entry.get("api_mode"))
         if api_mode:
             result["api_mode"] = api_mode
@@ -636,9 +654,18 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
 
 def _custom_provider_request_overrides(custom_provider: Dict[str, Any]) -> Dict[str, Any]:
     extra_body = custom_provider.get("extra_body")
-    if not isinstance(extra_body, dict) or not extra_body:
-        return {}
-    return {"extra_body": dict(extra_body)}
+    headers = custom_provider.get("headers")
+    overrides: Dict[str, Any] = {}
+    if isinstance(extra_body, dict) and extra_body:
+        overrides["extra_body"] = dict(extra_body)
+    if isinstance(headers, dict) and headers:
+        header_key = (
+            "headers"
+            if custom_provider.get("api_mode") == "anthropic_messages"
+            else "extra_headers"
+        )
+        overrides[header_key] = dict(headers)
+    return overrides
 
 
 def _resolve_named_custom_runtime(

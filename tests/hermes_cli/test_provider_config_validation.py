@@ -102,6 +102,38 @@ class TestNormalizeCustomProviderEntry:
         assert result is not None
         assert not any("unknown config keys" in r.message.lower() for r in caplog.records)
 
+    def test_headers_preserved_and_not_flagged_unknown(self, caplog):
+        """Custom provider headers should survive normalization."""
+        entry = {
+            "base_url": "https://api.example.com",
+            "api_key": "***",
+            "headers": {
+                "X-Claude-Code-Session-Id": "session-1",
+                "anthropic-version": "2023-06-01",
+            },
+        }
+        with caplog.at_level(logging.WARNING):
+            result = _normalize_custom_provider_entry(entry, provider_key="test")
+        assert result is not None
+        assert result["headers"] == {
+            "X-Claude-Code-Session-Id": "session-1",
+            "anthropic-version": "2023-06-01",
+        }
+        assert not any("unknown config keys" in r.message.lower() for r in caplog.records)
+
+    def test_desktop_metadata_preserved_and_not_flagged_unknown(self, caplog):
+        """Desktop account metadata should not spam unknown-key warnings."""
+        entry = {
+            "base_url": "https://api.example.com",
+            "api_key": "***",
+            "token_id": 42,
+        }
+        with caplog.at_level(logging.WARNING):
+            result = _normalize_custom_provider_entry(entry, provider_key="test")
+        assert result is not None
+        assert result["token_id"] == 42
+        assert not any("unknown config keys" in r.message.lower() for r in caplog.records)
+
     def test_camel_case_warning_logged(self, caplog):
         """camelCase alias mapping should produce a warning."""
         entry = {

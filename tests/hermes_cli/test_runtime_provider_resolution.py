@@ -1662,6 +1662,35 @@ def test_named_custom_runtime_propagates_extra_body_direct_path(monkeypatch):
     }
 
 
+def test_named_custom_runtime_propagates_headers_direct_path(monkeypatch):
+    """Custom provider headers should become runtime request_overrides."""
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "my-claude")
+    monkeypatch.setattr(
+        rp,
+        "_get_named_custom_provider",
+        lambda p: {
+            "name": "my-claude",
+            "base_url": "https://relay.example.com/anthropic",
+            "api_key": "test-key",
+            "model": "claude-opus-4-6",
+            "api_mode": "anthropic_messages",
+            "headers": {
+                "X-Claude-Code-Session-Id": "session-1",
+                "anthropic-version": "2023-06-01",
+            },
+        },
+    )
+    monkeypatch.setattr(rp, "_try_resolve_from_custom_pool", lambda *a, **k: None)
+
+    resolved = rp.resolve_runtime_provider(requested="my-claude")
+    assert resolved["request_overrides"] == {
+        "headers": {
+            "X-Claude-Code-Session-Id": "session-1",
+            "anthropic-version": "2023-06-01",
+        }
+    }
+
+
 def test_named_custom_runtime_propagates_model_pool_path(monkeypatch):
     """Model should propagate even when credential pool handles credentials."""
     monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "my-server")
@@ -1720,6 +1749,39 @@ def test_named_custom_runtime_propagates_extra_body_pool_path(monkeypatch):
     resolved = rp.resolve_runtime_provider(requested="my-gemma")
     assert resolved["request_overrides"] == {
         "extra_body": {"enable_thinking": True}
+    }
+
+
+def test_named_custom_runtime_propagates_headers_pool_path(monkeypatch):
+    """Custom provider headers should survive credential-pool resolution."""
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "my-claude")
+    monkeypatch.setattr(
+        rp,
+        "_get_named_custom_provider",
+        lambda p: {
+            "name": "my-claude",
+            "base_url": "https://relay.example.com/anthropic",
+            "api_key": "test-key",
+            "model": "claude-opus-4-6",
+            "api_mode": "anthropic_messages",
+            "headers": {"X-Claude-Code-Session-Id": "session-1"},
+        },
+    )
+    monkeypatch.setattr(
+        rp,
+        "_try_resolve_from_custom_pool",
+        lambda *a, **k: {
+            "provider": "custom",
+            "api_mode": "anthropic_messages",
+            "base_url": "https://relay.example.com/anthropic",
+            "api_key": "pool-key",
+            "source": "pool:custom:my-claude",
+        },
+    )
+
+    resolved = rp.resolve_runtime_provider(requested="my-claude")
+    assert resolved["request_overrides"] == {
+        "headers": {"X-Claude-Code-Session-Id": "session-1"}
     }
 
 
@@ -2229,6 +2291,24 @@ class TestProviderEntryApiKeyEnvAlias:
         assert normalized is not None
         assert "extra_body" in _VALID_CUSTOM_PROVIDER_FIELDS
         assert normalized["extra_body"] == entry["extra_body"]
+
+    def test_headers_and_token_id_are_supported_schema(self):
+        from hermes_cli.config import (
+            _VALID_CUSTOM_PROVIDER_FIELDS,
+            _normalize_custom_provider_entry,
+        )
+        entry = {
+            "name": "vendor",
+            "base_url": "https://api.vendor.example.com",
+            "headers": {"X-Claude-Code-Session-Id": "session-1"},
+            "token_id": 42,
+        }
+        normalized = _normalize_custom_provider_entry(dict(entry), provider_key="vendor")
+        assert normalized is not None
+        assert "headers" in _VALID_CUSTOM_PROVIDER_FIELDS
+        assert "token_id" in _VALID_CUSTOM_PROVIDER_FIELDS
+        assert normalized["headers"] == entry["headers"]
+        assert normalized["token_id"] == 42
 # =============================================================================
 # Tencent TokenHub — API-key provider runtime resolution
 # =============================================================================

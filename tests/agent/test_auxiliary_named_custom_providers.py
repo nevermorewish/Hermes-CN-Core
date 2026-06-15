@@ -306,6 +306,31 @@ class TestProvidersDictApiModeAnthropicMessages:
         assert entry.get("base_url") == "https://example-relay.test/anthropic"
         assert entry.get("api_key") == "sk-test"
 
+    def test_providers_dict_propagates_headers(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("MYRELAY_API_KEY", "sk-test")
+        _write_config(tmp_path, {
+            "providers": {
+                "myrelay": {
+                    "name": "myrelay",
+                    "base_url": "https://example-relay.test/anthropic",
+                    "key_env": "MYRELAY_API_KEY",
+                    "api_mode": "anthropic_messages",
+                    "default_model": "claude-opus-4-7",
+                    "headers": {
+                        "X-Claude-Code-Session-Id": "session-1",
+                        "anthropic-version": "2023-06-01",
+                    },
+                },
+            },
+        })
+        from hermes_cli.runtime_provider import _get_named_custom_provider
+        entry = _get_named_custom_provider("myrelay")
+        assert entry is not None
+        assert entry.get("headers") == {
+            "X-Claude-Code-Session-Id": "session-1",
+            "anthropic-version": "2023-06-01",
+        }
+
     def test_providers_dict_invalid_api_mode_is_dropped(self, tmp_path):
         _write_config(tmp_path, {
             "providers": {
@@ -426,6 +451,43 @@ class TestProvidersDictApiModeAnthropicMessages:
         assert isinstance(sync_client, OpenAI)
         async_client, _ = resolve_provider_client("localchat", async_mode=True)
         assert isinstance(async_client, AsyncOpenAI)
+
+    def test_anthropic_messages_provider_passes_headers_to_client_builder(
+        self, tmp_path, monkeypatch
+    ):
+        """Named Anthropic-wire providers should pass configured headers."""
+        monkeypatch.setenv("MYRELAY_API_KEY", "sk-test")
+        _write_config(tmp_path, {
+            "providers": {
+                "myrelay": {
+                    "name": "myrelay",
+                    "base_url": "https://example-relay.test/anthropic",
+                    "key_env": "MYRELAY_API_KEY",
+                    "api_mode": "anthropic_messages",
+                    "default_model": "claude-opus-4-7",
+                    "headers": {
+                        "X-Claude-Code-Session-Id": "session-1",
+                        "anthropic-version": "2023-06-01",
+                    },
+                },
+            },
+        })
+        with patch("agent.anthropic_adapter.build_anthropic_client") as build_client:
+            build_client.return_value = MagicMock()
+            from agent.auxiliary_client import resolve_provider_client
+
+            client, model = resolve_provider_client("myrelay", async_mode=False)
+
+        assert client is not None
+        assert model == "claude-opus-4-7"
+        build_client.assert_called_once_with(
+            "sk-test",
+            "https://example-relay.test/anthropic",
+            default_headers={
+                "X-Claude-Code-Session-Id": "session-1",
+                "anthropic-version": "2023-06-01",
+            },
+        )
 
 
 class TestCustomProviderAliasCollision:
