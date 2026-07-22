@@ -30,7 +30,12 @@ def _make_tool_defs(*names: str) -> list:
     ]
 
 
-def _make_agent(fallback_model=None, provider="custom", base_url="https://my-llm.example.com/v1"):
+def _make_agent(
+    fallback_model=None,
+    provider="custom",
+    base_url="https://my-llm.example.com/v1",
+    request_overrides=None,
+):
     """Create a minimal AIAgent with optional fallback config."""
     with (
         patch("run_agent.get_tool_definitions", return_value=_make_tool_defs("web_search")),
@@ -45,6 +50,7 @@ def _make_agent(fallback_model=None, provider="custom", base_url="https://my-llm
             skip_context_files=True,
             skip_memory=True,
             fallback_model=fallback_model,
+            request_overrides=request_overrides,
         )
         agent.client = MagicMock()
         return agent
@@ -82,6 +88,15 @@ class TestPrimaryRuntimeSnapshot:
         assert rt["compressor_provider"] == cc.provider
         assert rt["compressor_context_length"] == cc.context_length
         assert rt["compressor_threshold_tokens"] == cc.threshold_tokens
+
+    def test_snapshot_includes_provider_request_overrides(self):
+        overrides = {
+            "extra_headers": {"X-User-Id": "wb-user-1"},
+            "service_tier": "priority",
+        }
+        agent = _make_agent(request_overrides=overrides)
+
+        assert agent._primary_runtime["request_overrides"] == overrides
 
     def test_snapshot_includes_anthropic_state_when_applicable(self):
         """Anthropic-mode agents should snapshot Anthropic-specific state."""
@@ -200,6 +215,26 @@ class TestRestorePrimaryRuntime:
             agent._restore_primary_runtime()
 
         assert agent._use_prompt_caching == original_caching
+
+    def test_fallback_drops_provider_headers_and_restore_brings_them_back(self):
+        overrides = {
+            "extra_headers": {"X-User-Id": "wb-user-1"},
+            "service_tier": "priority",
+        }
+        agent = _make_agent(
+            fallback_model={"provider": "openrouter", "model": "anthropic/claude-sonnet-4"},
+            request_overrides=overrides,
+        )
+        mock_client = _mock_resolve()
+        with patch("agent.auxiliary_client.resolve_provider_client", return_value=(mock_client, None)):
+            agent._try_activate_fallback()
+
+        assert agent.request_overrides == {"service_tier": "priority"}
+
+        with patch("run_agent.OpenAI", return_value=MagicMock()):
+            agent._restore_primary_runtime()
+
+        assert agent.request_overrides == overrides
 
     def test_restore_survives_exception(self):
         """If client rebuild fails, the method returns False gracefully."""

@@ -1137,6 +1137,14 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         agent.provider = fb_provider
         agent.base_url = fb_base_url
         agent.api_mode = fb_api_mode
+        # Provider-scoped request fields (for example an enterprise
+        # X-User-Id header) must never follow a failed primary request to an
+        # unrelated fallback endpoint. Session controls remain applicable.
+        agent.request_overrides = {
+            key: value
+            for key, value in dict(getattr(agent, "request_overrides", {}) or {}).items()
+            if key in {"service_tier", "speed"}
+        }
         if hasattr(agent, "_transport_cache"):
             agent._transport_cache.clear()
         agent._fallback_activated = True

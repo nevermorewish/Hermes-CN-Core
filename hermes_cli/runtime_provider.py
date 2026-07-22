@@ -489,6 +489,29 @@ def _lift_max_output_tokens(entry: Dict[str, Any], result: Dict[str, Any]) -> No
             return
 
 
+def _lift_custom_request_fields(entry: Dict[str, Any], result: Dict[str, Any]) -> None:
+    """Copy request-level custom-provider options into a resolved entry.
+
+    ``extra_headers`` is intentionally request-scoped instead of being folded
+    into the OpenAI client's global defaults. This keeps provider-specific
+    identity headers attached to the selected runtime and lets an in-place
+    model switch replace them atomically.
+    """
+    extra_body = entry.get("extra_body")
+    if isinstance(extra_body, dict) and extra_body:
+        result["extra_body"] = dict(extra_body)
+
+    extra_headers = entry.get("extra_headers")
+    if isinstance(extra_headers, dict) and extra_headers:
+        headers = {
+            str(key).strip(): str(value)
+            for key, value in extra_headers.items()
+            if str(key).strip() and isinstance(value, (str, int, float, bool))
+        }
+        if headers:
+            result["extra_headers"] = headers
+
+
 def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, Any]]:
     requested_norm = _normalize_custom_provider_name(requested_provider or "")
     if not requested_norm or requested_norm == "custom":
@@ -543,9 +566,7 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
                         "api_key": resolved_api_key,
                         "model": entry.get("default_model", ""),
                     }
-                    extra_body = entry.get("extra_body")
-                    if isinstance(extra_body, dict):
-                        result["extra_body"] = dict(extra_body)
+                    _lift_custom_request_fields(entry, result)
                     # The v11→v12 migration writes the API mode under the new
                     # ``transport`` field, but hand-edited configs may still
                     # use the legacy ``api_mode`` spelling.  Accept both —
@@ -572,9 +593,7 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
                             "api_key": resolved_api_key,
                             "model": entry.get("default_model", ""),
                         }
-                        extra_body = entry.get("extra_body")
-                        if isinstance(extra_body, dict):
-                            result["extra_body"] = dict(extra_body)
+                        _lift_custom_request_fields(entry, result)
                         api_mode = _parse_api_mode(entry.get("api_mode") or entry.get("transport"))
                         if api_mode:
                             result["api_mode"] = api_mode
@@ -619,9 +638,7 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
             result["key_env"] = key_env
         if provider_key:
             result["provider_key"] = provider_key
-        extra_body = entry.get("extra_body")
-        if isinstance(extra_body, dict):
-            result["extra_body"] = dict(extra_body)
+        _lift_custom_request_fields(entry, result)
         api_mode = _parse_api_mode(entry.get("api_mode"))
         if api_mode:
             result["api_mode"] = api_mode
@@ -635,10 +652,14 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
 
 
 def _custom_provider_request_overrides(custom_provider: Dict[str, Any]) -> Dict[str, Any]:
+    overrides: Dict[str, Any] = {}
     extra_body = custom_provider.get("extra_body")
-    if not isinstance(extra_body, dict) or not extra_body:
-        return {}
-    return {"extra_body": dict(extra_body)}
+    if isinstance(extra_body, dict) and extra_body:
+        overrides["extra_body"] = dict(extra_body)
+    extra_headers = custom_provider.get("extra_headers")
+    if isinstance(extra_headers, dict) and extra_headers:
+        overrides["extra_headers"] = dict(extra_headers)
+    return overrides
 
 
 def _resolve_named_custom_runtime(

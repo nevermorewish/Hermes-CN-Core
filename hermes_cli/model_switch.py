@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, List, NamedTuple, Optional
 
 from hermes_cli.providers import (
@@ -271,6 +271,7 @@ class ModelSwitchResult:
     api_key: str = ""
     base_url: str = ""
     api_mode: str = ""
+    request_overrides: dict[str, Any] = field(default_factory=dict)
     error_message: str = ""
     warning_message: str = ""
     provider_label: str = ""
@@ -1071,6 +1072,7 @@ def switch_model(
     api_key = current_api_key
     base_url = current_base_url
     api_mode = ""
+    request_overrides: dict[str, Any] = {}
 
     if provider_changed or explicit_provider:
         import os
@@ -1105,6 +1107,7 @@ def switch_model(
                 api_key = runtime.get("api_key", "") or _ukey
                 base_url = runtime.get("base_url", "") or _user_pdef.base_url
                 api_mode = runtime.get("api_mode", "")
+                request_overrides = dict(runtime.get("request_overrides") or {})
             except Exception:
                 api_key = _ukey
                 base_url = _user_pdef.base_url
@@ -1118,6 +1121,7 @@ def switch_model(
                 api_key = runtime.get("api_key", "")
                 base_url = runtime.get("base_url", "")
                 api_mode = runtime.get("api_mode", "")
+                request_overrides = dict(runtime.get("request_overrides") or {})
             except Exception as e:
                 return ModelSwitchResult(
                     success=False,
@@ -1142,6 +1146,7 @@ def switch_model(
             api_key = runtime.get("api_key", "")
             base_url = runtime.get("base_url", "")
             api_mode = runtime.get("api_mode", "")
+            request_overrides = dict(runtime.get("request_overrides") or {})
         except Exception:
             pass
 
@@ -1278,6 +1283,7 @@ def switch_model(
         api_key=api_key,
         base_url=base_url,
         api_mode=api_mode,
+        request_overrides=request_overrides,
         warning_message=" | ".join(warnings) if warnings else "",
         provider_label=provider_label,
         resolved_via_alias=resolved_alias,

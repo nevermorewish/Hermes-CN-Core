@@ -188,6 +188,10 @@ def test_successful_switch_still_works_after_rollback_refactor():
 
     new_client = MagicMock(name="NewClient")
     agent._create_openai_client = lambda *_a, **_kw: new_client
+    agent.request_overrides = {
+        "extra_headers": {"X-Old-Provider": "stale"},
+        "service_tier": "priority",
+    }
 
     with patch("hermes_cli.timeouts.get_provider_request_timeout", return_value=None):
         agent.switch_model(
@@ -196,9 +200,37 @@ def test_successful_switch_still_works_after_rollback_refactor():
             api_key="or-key-new",
             base_url="https://openrouter.ai/api/v1",
             api_mode="chat_completions",
+            request_overrides={
+                "extra_headers": {"X-User-Id": "wb-user-1"},
+            },
         )
 
     assert agent.model == "openai/gpt-5"
     assert agent.provider == "openrouter"
     assert agent.api_key == "or-key-new"
     assert agent.client is new_client
+    assert agent.request_overrides == {
+        "extra_headers": {"X-User-Id": "wb-user-1"},
+        "service_tier": "priority",
+    }
+    assert agent._primary_runtime["request_overrides"] == agent.request_overrides
+
+
+def test_cross_provider_switch_without_explicit_overrides_drops_provider_headers():
+    agent = _make_agent_openrouter()
+    agent._create_openai_client = lambda *_a, **_kw: MagicMock(name="LocalClient")
+    agent.request_overrides = {
+        "extra_headers": {"X-User-Id": "must-not-leak"},
+        "speed": "fast",
+    }
+
+    with patch("hermes_cli.timeouts.get_provider_request_timeout", return_value=None):
+        agent.switch_model(
+            new_model="local-model",
+            new_provider="custom:local",
+            api_key="no-key-required",
+            base_url="http://localhost:8000/v1",
+            api_mode="chat_completions",
+        )
+
+    assert agent.request_overrides == {"speed": "fast"}

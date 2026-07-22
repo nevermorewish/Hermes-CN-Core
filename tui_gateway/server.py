@@ -1484,6 +1484,7 @@ def _apply_model_switch(sid: str, session: dict, raw_input: str) -> dict:
             api_key=result.api_key,
             base_url=result.base_url,
             api_mode=result.api_mode,
+            request_overrides=result.request_overrides,
         )
         _restart_slash_worker(session)
         _emit("session.info", sid, _session_info(agent, session))

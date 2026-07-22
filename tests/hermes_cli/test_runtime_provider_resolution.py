@@ -1585,12 +1585,14 @@ def test_get_named_custom_provider_includes_model(monkeypatch):
             "api_key": "test-key",
             "api_mode": "chat_completions",
             "model": "qwen3.6-plus",
+            "extra_headers": {"X-User-Id": "wb-user-1"},
         }],
     })
 
     result = rp._get_named_custom_provider("my-dashscope")
     assert result is not None
     assert result["model"] == "qwen3.6-plus"
+    assert result["extra_headers"] == {"X-User-Id": "wb-user-1"}
 
 
 def test_get_named_custom_provider_excludes_empty_model(monkeypatch):
@@ -1649,6 +1651,7 @@ def test_named_custom_runtime_propagates_extra_body_direct_path(monkeypatch):
                 "enable_thinking": True,
                 "reasoning_effort": "high",
             },
+            "extra_headers": {"X-User-Id": "wb-user-1"},
         },
     )
     monkeypatch.setattr(rp, "_try_resolve_from_custom_pool", lambda *a, **k: None)
@@ -1658,7 +1661,8 @@ def test_named_custom_runtime_propagates_extra_body_direct_path(monkeypatch):
         "extra_body": {
             "enable_thinking": True,
             "reasoning_effort": "high",
-        }
+        },
+        "extra_headers": {"X-User-Id": "wb-user-1"},
     }
 
 
@@ -1704,6 +1708,7 @@ def test_named_custom_runtime_propagates_extra_body_pool_path(monkeypatch):
             "api_key": "test-key",
             "model": "google/gemma-4-31b-it",
             "extra_body": {"enable_thinking": True},
+            "extra_headers": {"X-User-Id": "wb-user-1"},
         },
     )
     monkeypatch.setattr(
@@ -1719,7 +1724,8 @@ def test_named_custom_runtime_propagates_extra_body_pool_path(monkeypatch):
 
     resolved = rp.resolve_runtime_provider(requested="my-gemma")
     assert resolved["request_overrides"] == {
-        "extra_body": {"enable_thinking": True}
+        "extra_body": {"enable_thinking": True},
+        "extra_headers": {"X-User-Id": "wb-user-1"},
     }
 
 
