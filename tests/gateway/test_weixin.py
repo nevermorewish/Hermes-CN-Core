@@ -1,8 +1,8 @@
 """Tests for the Weixin platform adapter."""
 
 import asyncio
-import base64
-import json
+import pybase64 as base64
+import orjson
 import os
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -244,7 +244,7 @@ class TestWeixinStatePersistence:
         account_path = tmp_path / "weixin" / "accounts" / "acct.json"
         account_path.parent.mkdir(parents=True, exist_ok=True)
         original = {"token": "old-token", "base_url": "https://old.example.com"}
-        account_path.write_text(json.dumps(original), encoding="utf-8")
+        account_path.write_text(orjson.dumps(original).decode('utf-8'), encoding="utf-8")
 
         def _boom(_src, _dst):
             raise OSError("disk full")
@@ -264,12 +264,12 @@ class TestWeixinStatePersistence:
         else:
             raise AssertionError("expected save_weixin_account to propagate replace failure")
 
-        assert json.loads(account_path.read_text(encoding="utf-8")) == original
+        assert orjson.loads(account_path.read_text(encoding="utf-8", errors="replace")) == original
 
     def test_context_token_persist_preserves_existing_file_on_replace_failure(self, tmp_path, monkeypatch):
         token_path = tmp_path / "weixin" / "accounts" / "acct.context-tokens.json"
         token_path.parent.mkdir(parents=True, exist_ok=True)
-        token_path.write_text(json.dumps({"user-a": "old-token"}), encoding="utf-8")
+        token_path.write_text(orjson.dumps({"user-a": "old-token"}).decode('utf-8'), encoding="utf-8")
 
         def _boom(_src, _dst):
             raise OSError("disk full")
@@ -280,13 +280,13 @@ class TestWeixinStatePersistence:
         with patch.object(weixin.logger, "warning") as warning_mock:
             store.set("acct", "user-b", "new-token")
 
-        assert json.loads(token_path.read_text(encoding="utf-8")) == {"user-a": "old-token"}
+        assert orjson.loads(token_path.read_text(encoding="utf-8", errors="replace")) == {"user-a": "old-token"}
         warning_mock.assert_called_once()
 
     def test_save_sync_buf_preserves_existing_file_on_replace_failure(self, tmp_path, monkeypatch):
         sync_path = tmp_path / "weixin" / "accounts" / "acct.sync.json"
         sync_path.parent.mkdir(parents=True, exist_ok=True)
-        sync_path.write_text(json.dumps({"get_updates_buf": "old-sync"}), encoding="utf-8")
+        sync_path.write_text(orjson.dumps({"get_updates_buf": "old-sync"}).decode('utf-8'), encoding="utf-8")
 
         def _boom(_src, _dst):
             raise OSError("disk full")
@@ -300,7 +300,7 @@ class TestWeixinStatePersistence:
         else:
             raise AssertionError("expected _save_sync_buf to propagate replace failure")
 
-        assert json.loads(sync_path.read_text(encoding="utf-8")) == {"get_updates_buf": "old-sync"}
+        assert orjson.loads(sync_path.read_text(encoding="utf-8", errors="replace")) == {"get_updates_buf": "old-sync"}
 
 
 class TestWeixinQrLogin:
@@ -410,6 +410,98 @@ class TestWeixinChunkDelivery:
         retry = send_message_mock.await_args_list[2].kwargs
         assert first_try["text"] == retry["text"]
         assert first_try["client_id"] == retry["client_id"]
+
+    @patch("gateway.platforms.weixin.asyncio.sleep", new_callable=AsyncMock)
+    @patch("gateway.platforms.weixin._send_message", new_callable=AsyncMock)
+    def test_repeated_rate_limits_open_circuit_for_followup_sends(self, send_message_mock, sleep_mock):
+        adapter = self._connected_adapter()
+        adapter._send_chunk_retries = 3
+        adapter._send_chunk_retry_delay_seconds = 0
+        adapter._rate_limit_circuit_threshold = 2
+        adapter._rate_limit_circuit_window_seconds = 60
+        adapter._rate_limit_circuit_open_seconds = 60
+
+        send_message_mock.return_value = {
+            "ret": weixin.RATE_LIMIT_ERRCODE,
+            "errcode": weixin.RATE_LIMIT_ERRCODE,
+            "errmsg": "frequency limit",
+        }
+
+        first = asyncio.run(adapter.send("wxid_test123", "first"))
+        second = asyncio.run(adapter.send("wxid_test123", "second"))
+
+        assert first.success is False
+        assert "cooldown" in (first.error or "")
+        assert second.success is False
+        assert "cooldown" in (second.error or "")
+        # The first rate-limit response is retried once. The second response
+        # crosses the sliding-window threshold, opens the breaker, and both the
+        # rest of the current chunk and follow-up sends fail fast.
+        assert send_message_mock.await_count == 2
+        assert sleep_mock.await_count == 1
+
+    @patch("gateway.platforms.weixin._send_message", new_callable=AsyncMock)
+    def test_open_rate_limit_circuit_fails_fast_without_sendmessage(self, send_message_mock):
+        adapter = self._connected_adapter()
+        adapter._rate_limit_circuit_open_seconds = 60
+        adapter._open_rate_limit_circuit()
+
+        result = asyncio.run(adapter.send("wxid_test123", "blocked"))
+
+        assert result.success is False
+        assert "cooldown" in (result.error or "")
+        send_message_mock.assert_not_awaited()
+
+    @patch("gateway.platforms.weixin._send_message", new_callable=AsyncMock)
+    def test_successful_send_after_cooldown_resets_rate_limit_state(self, send_message_mock):
+        adapter = self._connected_adapter()
+        adapter._rate_limit_circuit_until = weixin.time.monotonic() - 1
+        adapter._rate_limit_events = [weixin.time.monotonic()]
+        send_message_mock.return_value = {"errcode": 0}
+
+        result = asyncio.run(adapter.send("wxid_test123", "after cooldown"))
+
+        assert result.success is True
+        assert adapter._rate_limit_events == []
+        assert adapter._rate_limit_circuit_until == 0.0
+        send_message_mock.assert_awaited_once()
+
+    def test_concurrent_rate_limited_sends_are_serialized_by_gate(self):
+        adapter = self._connected_adapter()
+        adapter._send_chunk_retries = 3
+        adapter._send_chunk_retry_delay_seconds = 0
+        adapter._rate_limit_circuit_threshold = 1
+        adapter._rate_limit_circuit_open_seconds = 60
+        active = 0
+        peak_active = 0
+
+        async def rate_limited_send(*args, **kwargs):
+            nonlocal active, peak_active
+            active += 1
+            peak_active = max(peak_active, active)
+            await asyncio.sleep(0)
+            active -= 1
+            return {
+                "ret": weixin.RATE_LIMIT_ERRCODE,
+                "errcode": weixin.RATE_LIMIT_ERRCODE,
+                "errmsg": "frequency limit",
+            }
+
+        async def run_burst():
+            with patch("gateway.platforms.weixin._send_message", side_effect=rate_limited_send) as send_message_mock:
+                results = await asyncio.gather(
+                    *(adapter.send("wxid_test123", f"message {idx}") for idx in range(20))
+                )
+                return results, send_message_mock
+
+        results, send_message_mock = asyncio.run(run_burst())
+
+        assert all(not result.success for result in results)
+        assert peak_active == 1
+        # Once the first send observes iLink's rate limit, the breaker opens;
+        # queued concurrent sends acquire the gate later and fail before making
+        # their own iLink calls.
+        assert send_message_mock.await_count == 1
 
 
 class TestWeixinOutboundMedia:
@@ -626,7 +718,7 @@ class TestWeixinMediaBuilder:
     """Media builder uses base64(hex_key), not base64(raw_bytes) for aes_key."""
 
     def test_image_builder_aes_key_is_base64_of_hex(self):
-        import base64
+        import pybase64 as base64
         adapter = _make_adapter()
         media_type, builder = adapter._outbound_media_builder("photo.jpg")
         assert media_type == weixin.MEDIA_IMAGE

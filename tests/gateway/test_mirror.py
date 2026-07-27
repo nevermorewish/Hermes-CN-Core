@@ -1,6 +1,6 @@
 """Tests for gateway/mirror.py — session mirroring."""
 
-import json
+import orjson
 from unittest.mock import patch, MagicMock
 
 import gateway.mirror as mirror_mod
@@ -15,7 +15,7 @@ def _setup_sessions(tmp_path, sessions_data):
     sessions_dir = tmp_path / "sessions"
     sessions_dir.mkdir(parents=True, exist_ok=True)
     index_file = sessions_dir / "sessions.json"
-    index_file.write_text(json.dumps(sessions_data))
+    index_file.write_text(orjson.dumps(sessions_data).decode('utf-8'))
     return sessions_dir, index_file
 
 
@@ -144,7 +144,11 @@ class TestFindSessionId:
             }
         })
 
-        with patch.object(mirror_mod, "_SESSIONS_INDEX", index_file):
+        # Force the sessions.json fallback: without this, _find_session_id
+        # queries the ambient state.db first and an unrelated real session
+        # row can shadow the fixture data.
+        with patch("hermes_state.SessionDB", side_effect=Exception("no db")), \
+             patch.object(mirror_mod, "_SESSIONS_INDEX", index_file):
             result = _find_session_id("telegram", "123")
 
         assert result == "sess_1"

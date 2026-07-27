@@ -54,6 +54,7 @@ def _make_runner(history: list[dict[str, str]]):
     runner.session_store.rewrite_transcript = MagicMock()
     runner.session_store.update_session = MagicMock()
     runner.session_store._save = MagicMock()
+    runner._session_db = None
     return runner
 
 
@@ -68,7 +69,7 @@ async def test_compress_focus_topic_passed_to_agent():
     agent_instance.session_id = "sess-1"
     agent_instance._compress_context.return_value = (compressed, "")
 
-    def _estimate(messages):
+    def _estimate(messages, **kwargs):
         return 100
 
     with (

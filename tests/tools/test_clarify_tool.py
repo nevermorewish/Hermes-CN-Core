@@ -1,6 +1,6 @@
 """Tests for tools/clarify_tool.py - Interactive clarifying questions."""
 
-import json
+import orjson
 from typing import List, Optional
 
 
@@ -9,6 +9,7 @@ from tools.clarify_tool import (
     check_clarify_requirements,
     MAX_CHOICES,
     CLARIFY_SCHEMA,
+    _flatten_choice,
 )
 
 
@@ -22,7 +23,7 @@ class TestClarifyToolBasics:
             assert choices is None
             return "blue"
 
-        result = json.loads(clarify_tool("What color?", callback=mock_callback))
+        result = orjson.loads(clarify_tool("What color?", callback=mock_callback))
         assert result["question"] == "What color?"
         assert result["choices_offered"] is None
         assert result["user_response"] == "blue"
@@ -34,7 +35,7 @@ class TestClarifyToolBasics:
             assert choices == ["1", "2", "3"]
             return "2"
 
-        result = json.loads(clarify_tool(
+        result = orjson.loads(clarify_tool(
             "Pick a number",
             choices=["1", "2", "3"],
             callback=mock_callback
@@ -45,18 +46,18 @@ class TestClarifyToolBasics:
 
     def test_empty_question_returns_error(self):
         """Should return error for empty question."""
-        result = json.loads(clarify_tool("", callback=lambda q, c: "ignored"))
+        result = orjson.loads(clarify_tool("", callback=lambda q, c: "ignored"))
         assert "error" in result
         assert "required" in result["error"].lower()
 
     def test_whitespace_only_question_returns_error(self):
         """Should return error for whitespace-only question."""
-        result = json.loads(clarify_tool("   \n\t  ", callback=lambda q, c: "ignored"))
+        result = orjson.loads(clarify_tool("   \n\t  ", callback=lambda q, c: "ignored"))
         assert "error" in result
 
     def test_no_callback_returns_error(self):
         """Should return error when no callback is provided."""
-        result = json.loads(clarify_tool("What do you want?"))
+        result = orjson.loads(clarify_tool("What do you want?"))
         assert "error" in result
         assert "not available" in result["error"].lower()
 
@@ -103,7 +104,7 @@ class TestClarifyToolChoicesValidation:
 
     def test_invalid_choices_type_returns_error(self):
         """Non-list choices should return error."""
-        result = json.loads(clarify_tool(
+        result = orjson.loads(clarify_tool(
             "Question?",
             choices="not a list",  # type: ignore
             callback=lambda q, c: "ignored"
@@ -131,7 +132,7 @@ class TestClarifyToolCallbackHandling:
         def failing_callback(question: str, choices: Optional[List[str]]) -> str:
             raise RuntimeError("User cancelled")
 
-        result = json.loads(clarify_tool("Question?", callback=failing_callback))
+        result = orjson.loads(clarify_tool("Question?", callback=failing_callback))
         assert "error" in result
         assert "Failed to get user input" in result["error"]
         assert "User cancelled" in result["error"]
@@ -152,7 +153,7 @@ class TestClarifyToolCallbackHandling:
         def mock_callback(question: str, choices: Optional[List[str]]) -> str:
             return "  response with spaces  \n"
 
-        result = json.loads(clarify_tool("Q?", callback=mock_callback))
+        result = orjson.loads(clarify_tool("Q?", callback=mock_callback))
         assert result["user_response"] == "response with spaces"
 
 
@@ -162,6 +163,70 @@ class TestCheckClarifyRequirements:
     def test_always_returns_true(self):
         """clarify tool has no external requirements."""
         assert check_clarify_requirements() is True
+
+
+class TestClarifyDictChoices:
+    """Dict-shaped choices must be unwrapped to user-facing text at the source.
+
+    LLMs sometimes emit [{"description": "..."}] instead of bare strings. The
+    naive str(c) coercion leaked the Python dict repr onto every surface (CLI
+    panel, Discord buttons, Telegram list) AND returned it verbatim as the
+    user's answer. _flatten_choice normalises at the one platform-agnostic
+    entry point so the whole class is fixed in one place.
+    """
+
+    def test_flatten_unwraps_label_first(self):
+        assert _flatten_choice({"label": "Short", "description": "Long"}) == "Short"
+
+    def test_flatten_unwraps_description_when_no_label(self):
+        assert _flatten_choice({"description": "A loose layout"}) == "A loose layout"
+
+    def test_flatten_unwrap_order_label_over_description(self):
+        assert _flatten_choice({"description": "verbose", "label": "tight"}) == "tight"
+
+    def test_flatten_drops_name_value_only_dict(self):
+        # name/value are component-shaped fields, not user-facing labels —
+        # picking them would leak raw enum values / short model ids.
+        assert _flatten_choice({"name": "tight", "value": "x"}) == ""
+
+    def test_flatten_prefers_canonical_key_over_name(self):
+        assert _flatten_choice({"name": "tight", "description": "Tight desc"}) == "Tight desc"
+
+    def test_flatten_drops_keyless_dict(self):
+        assert _flatten_choice({"foo": "bar", "n": 1}) == ""
+
+    def test_flatten_passthrough_string_and_scalar(self):
+        assert _flatten_choice("plain") == "plain"
+        assert _flatten_choice(7) == "7"
+        assert _flatten_choice(None) == ""
+
+    def test_dict_choices_reach_callback_as_clean_text(self):
+        """The whole point: the UI callback never sees a dict repr."""
+        seen = []
+
+        def cb(question, choices):
+            seen.extend(choices or [])
+            return choices[0]
+
+        result = orjson.loads(clarify_tool(
+            "Pick a layout",
+            choices=[
+                {"choice": "Tight", "description": "Tight, covers all 3 points"},
+                {"description": "Loose layout"},
+                {"name": "modelid", "value": "abc"},  # dropped, not leaked
+                "A plain string choice",
+            ],
+            callback=cb,
+        ))  # type: ignore
+        assert seen == [
+            "Tight, covers all 3 points",
+            "Loose layout",
+            "A plain string choice",
+        ]
+        # and the resolved answer is clean text, not a dict repr
+        assert result["user_response"] == "Tight, covers all 3 points"
+        assert "{" not in result["user_response"]
+        assert all("{" not in c for c in result["choices_offered"])
 
 
 class TestClarifySchema:

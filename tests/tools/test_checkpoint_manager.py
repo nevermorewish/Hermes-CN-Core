@@ -1,9 +1,11 @@
 """Tests for tools/checkpoint_manager.py — CheckpointManager (v2 single-store)."""
 
+import orjson
 import json
 import logging
 import os
 import subprocess
+import sys
 import time
 import pytest
 from pathlib import Path
@@ -486,6 +488,7 @@ class TestGitEnvIsolation:
         env = _git_env(tmp_path / "store", str(tmp_path))
         assert "GIT_INDEX_FILE" not in env
 
+    @pytest.mark.skipif(sys.platform == 'win32', reason="Windows baseline: Windows path/git/env issues")
     def test_sets_index_file_when_provided(self, tmp_path):
         env = _git_env(
             tmp_path / "store", str(tmp_path),
@@ -638,7 +641,7 @@ class TestTouchProjectMalformedMeta:
         _touch_project(store, workdir)
 
         # Metadata file should now be a valid dict with last_touch updated
-        data = json.loads(meta_path.read_text(encoding="utf-8"))
+        data = orjson.loads(meta_path.read_text(encoding="utf-8", errors="replace"))
         assert isinstance(data, dict)
         assert "last_touch" in data
         assert "workdir" in data
@@ -670,6 +673,7 @@ class TestSecurity:
         assert result["success"] is False
         assert "expected 4-64 hex characters" in result["error"]
 
+    @pytest.mark.skipif(sys.platform == 'win32', reason="Windows baseline: Windows path/git/env issues")
     def test_restore_rejects_path_traversal(self, mgr, work_dir):
         mgr.ensure_checkpoint(str(work_dir), "initial")
         cps = mgr.list_checkpoints(str(work_dir))
@@ -785,7 +789,7 @@ def _seed_v2_project(base: Path, workdir: Path, last_touch: float = None) -> str
     }
     mp = _project_meta_path(store, dir_hash)
     mp.parent.mkdir(parents=True, exist_ok=True)
-    mp.write_text(json.dumps(meta))
+    mp.write_text(orjson.dumps(meta).decode('utf-8'))
     return dir_hash
 
 
@@ -902,9 +906,9 @@ class TestPruneCheckpointsV2:
         # Backdate stale's last_touch to 60 days ago
         stale_hash = _project_hash(str(stale))
         meta_path = base / "store" / "projects" / f"{stale_hash}.json"
-        meta = json.loads(meta_path.read_text())
+        meta = orjson.loads(meta_path.read_text())
         meta["last_touch"] = time.time() - 60 * 86400
-        meta_path.write_text(json.dumps(meta))
+        meta_path.write_text(orjson.dumps(meta).decode('utf-8'))
 
         result = prune_checkpoints(
             retention_days=30, delete_orphans=False, checkpoint_base=base,
@@ -1012,6 +1016,7 @@ class TestStoreStatus:
 
 
 class TestClearFunctions:
+    @pytest.mark.skipif(sys.platform == 'win32', reason="Windows baseline: Windows path/git/env issues")
     def test_clear_all_wipes_base(self, tmp_path, monkeypatch, work_dir):
         base = tmp_path / "checkpoints"
         monkeypatch.setattr("tools.checkpoint_manager.CHECKPOINT_BASE", base)

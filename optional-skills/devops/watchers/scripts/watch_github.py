@@ -8,7 +8,8 @@ Usage (via cron with --no-agent):
       --script "$HERMES_HOME/skills/devops/watchers/scripts/watch_github.py" \\
       --script-args "--name hermes-issues --repo NousResearch/hermes-agent --scope issues"
 
-Set GITHUB_TOKEN (or GH_TOKEN) in ~/.hermes/.env to avoid the 60 req/hr
+Set GITHUB_TOKEN (or GH_TOKEN) in the Hermes .env file
+(``${HERMES_HOME:-~/.hermes}/.env``) to avoid the 60 req/hr
 anonymous rate limit.
 
 Scopes: issues | pulls | releases | commits.  Or pass --search QUERY to
@@ -18,9 +19,9 @@ use the /search/issues endpoint instead of /repos/:owner/:repo/:scope.
 from __future__ import annotations
 
 import argparse
-import json
+import orjson
 import os
-import re
+from agent.re_compat import re
 import sys
 import urllib.error
 import urllib.parse
@@ -133,8 +134,8 @@ def main() -> int:
         return 2
 
     try:
-        data = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+        data = orjson.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, orjson.JSONDecodeError) as e:
         print(f"watch_github: response is not valid JSON: {e}", file=sys.stderr)
         return 2
 

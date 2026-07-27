@@ -10,10 +10,10 @@ Fail-open: network errors allow the package to proceed.
 Inspired by Block/goose's extension malware check.
 """
 
-import json
+import orjson
 import logging
 import os
-import re
+from agent.re_compat import re
 import urllib.request
 from typing import Optional, Tuple
 
@@ -82,11 +82,25 @@ def _parse_package_from_args(
     if not args:
         return None, None
 
-    # Skip flags to find the package token
+    # Skip flags to find the package token.
+    # Honor npx's explicit install target: --package=NAME / --package NAME and
+    # the -p NAME short form, which name a package distinct from the executed
+    # binary. Without this the first bare positional (often the command name)
+    # is mistaken for the package.
     package_token = None
+    take_next = False
     for arg in args:
         if not isinstance(arg, str):
             continue
+        if take_next:
+            package_token = arg
+            break
+        if arg in ("--package", "-p"):
+            take_next = True
+            continue
+        if arg.startswith("--package="):
+            package_token = arg[len("--package="):]
+            break
         if arg.startswith("-"):
             continue
         package_token = arg
@@ -136,7 +150,7 @@ def _query_osv(
     if version:
         payload["version"] = version
 
-    data = json.dumps(payload).encode("utf-8")
+    data = orjson.dumps(payload)
     req = urllib.request.Request(
         _OSV_ENDPOINT,
         data=data,
@@ -148,7 +162,7 @@ def _query_osv(
     )
 
     with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
-        result = json.loads(resp.read())
+        result = orjson.loads(resp.read())
 
     vulns = result.get("vulns", [])
     # Only malware advisories — ignore regular CVEs

@@ -12,13 +12,14 @@ Platform support:
   Linux   — wl-paste (Wayland), xclip (X11)
 """
 
-import base64
+import pybase64 as base64
 import logging
 import os
 import subprocess
 import sys
 from pathlib import Path
 
+from hermes_cli._subprocess_compat import IS_WINDOWS, windows_hide_flags
 from hermes_constants import is_wsl as _is_wsl
 from tools.environments.windows_env import refresh_env_from_registry
 
@@ -68,7 +69,7 @@ def _macos_has_image() -> bool:
     try:
         info = subprocess.run(
             ["osascript", "-e", "clipboard info"],
-            capture_output=True, text=True, timeout=3,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3,
         )
         return "«class PNGf»" in info.stdout or "«class TIFF»" in info.stdout
     except Exception:
@@ -110,7 +111,7 @@ def _macos_osascript(dest: Path) -> bool:
     try:
         r = subprocess.run(
             ["osascript", "-e", script],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
         )
         if r.returncode == 0 and "fail" not in r.stdout and dest.exists() and dest.stat().st_size > 0:
             return True
@@ -199,9 +200,14 @@ _POWERSHELL_EXTRACT_IMAGE_SCRIPTS = (
 
 
 def _run_powershell(exe: str, script: str, timeout: int) -> subprocess.CompletedProcess:
+    from tools.environments.windows_env import ps_with_utf8
+    _subprocess_kwargs = {}
+    if IS_WINDOWS:
+        _subprocess_kwargs["creationflags"] = windows_hide_flags()
     return subprocess.run(
-        [exe, "-NoProfile", "-NonInteractive", "-Command", script],
-        capture_output=True, text=True, timeout=timeout,
+        [exe, "-NoProfile", "-NonInteractive", "-Command", ps_with_utf8(script)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
+        **_subprocess_kwargs,
     )
 
 
@@ -258,9 +264,13 @@ def _find_powershell() -> str | None:
     refresh_env_from_registry()
     for name in ("powershell", "pwsh"):
         try:
+            _subprocess_kwargs = {}
+            if IS_WINDOWS:
+                _subprocess_kwargs["creationflags"] = windows_hide_flags()
             r = subprocess.run(
                 [name, "-NoProfile", "-NonInteractive", "-Command", "echo ok"],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
+                **_subprocess_kwargs,
             )
             if r.returncode == 0 and "ok" in r.stdout:
                 return name
@@ -335,7 +345,7 @@ def _wayland_has_image() -> bool:
     try:
         r = subprocess.run(
             ["wl-paste", "--list-types"],
-            capture_output=True, text=True, timeout=3,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3,
         )
         return r.returncode == 0 and any(
             t.startswith("image/") for t in r.stdout.splitlines()
@@ -353,7 +363,7 @@ def _wayland_save(dest: Path) -> bool:
         # Check available MIME types
         types_r = subprocess.run(
             ["wl-paste", "--list-types"],
-            capture_output=True, text=True, timeout=3,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3,
         )
         if types_r.returncode != 0:
             return False
@@ -455,7 +465,7 @@ def _xclip_has_image() -> bool:
     try:
         r = subprocess.run(
             ["xclip", "-selection", "clipboard", "-t", "TARGETS", "-o"],
-            capture_output=True, text=True, timeout=3,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3,
         )
         return r.returncode == 0 and "image/png" in r.stdout
     except FileNotFoundError:
@@ -471,7 +481,7 @@ def _xclip_save(dest: Path) -> bool:
     try:
         targets = subprocess.run(
             ["xclip", "-selection", "clipboard", "-t", "TARGETS", "-o"],
-            capture_output=True, text=True, timeout=3,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3,
         )
         if "image/png" not in targets.stdout:
             return False

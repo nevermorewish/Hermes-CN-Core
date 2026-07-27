@@ -5,7 +5,7 @@ calls agent._convert_to_trajectory_format). Only the static helpers and
 the file-write logic live here.
 """
 
-import json
+import orjson
 import logging
 from datetime import datetime
 from typing import Any, Dict, List
@@ -49,8 +49,8 @@ def save_trajectory(trajectory: List[Dict[str, Any]], model: str,
     }
 
     try:
-        with open(filename, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        with open(filename, "a", encoding="utf-8", errors="replace") as f:
+            f.write(orjson.dumps(entry).decode('utf-8') + "\n")
         logger.info("Trajectory saved to %s", filename)
     except Exception as e:
         logger.warning("Failed to save trajectory: %s", e)

@@ -10,7 +10,7 @@ without polluting the shared type.
 
 from __future__ import annotations
 
-import json
+import orjson
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -122,6 +122,18 @@ class NormalizedResponse:
         return pd.get("reasoning_details")
 
     @property
+    def anthropic_content_blocks(self):
+        """Verbatim, order-preserving Anthropic content blocks for a turn.
+
+        Present only when an Anthropic turn interleaves signed thinking with
+        tool_use — the one shape the parallel reasoning_details + tool_calls
+        lists reconstruct in the wrong order, invalidating thinking-block
+        signatures on replay. See agent/transports/anthropic.py.
+        """
+        pd = self.provider_data or {}
+        return pd.get("anthropic_content_blocks")
+
+    @property
     def codex_reasoning_items(self):
         pd = self.provider_data or {}
         return pd.get("codex_reasoning_items")
@@ -147,7 +159,7 @@ def build_tool_call(
 
     Any extra keyword arguments are collected into ``provider_data``.
     """
-    args_str = json.dumps(arguments) if isinstance(arguments, dict) else str(arguments)
+    args_str = orjson.dumps(arguments).decode('utf-8') if isinstance(arguments, dict) else str(arguments)
     pd = dict(provider_fields) if provider_fields else None
     return ToolCall(id=id, name=name, arguments=args_str, provider_data=pd)
 

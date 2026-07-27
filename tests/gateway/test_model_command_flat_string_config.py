@@ -96,13 +96,13 @@ async def test_model_global_persists_when_config_has_flat_string_model(tmp_path,
     assert "gpt-5.5" in result
 
     # The persist block must have rewritten config.yaml as a nested dict.
-    written = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    written = yaml.safe_load(cfg_path.read_text(encoding="utf-8", errors="replace"))
     assert isinstance(written["model"], dict), (
         "model: should be coerced to a dict, got %r" % (written["model"],)
     )
     assert written["model"]["default"] == "gpt-5.5"
     assert written["model"]["provider"] == "openrouter"
-    assert written["model"]["base_url"] == "https://openrouter.ai/api/v1"
+    assert "base_url" not in written["model"]
 
 
 @pytest.mark.asyncio
@@ -131,7 +131,7 @@ async def test_model_global_persists_when_config_has_missing_model(tmp_path, mon
     )
 
     assert result is not None
-    written = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    written = yaml.safe_load(cfg_path.read_text(encoding="utf-8", errors="replace"))
     assert isinstance(written["model"], dict)
     assert written["model"]["default"] == "gpt-5.5"
     assert written["model"]["provider"] == "openrouter"
@@ -153,6 +153,49 @@ async def test_model_global_persists_when_config_has_proper_dict_model(tmp_path,
     )
 
     assert result is not None
-    written = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    written = yaml.safe_load(cfg_path.read_text(encoding="utf-8", errors="replace"))
     assert written["model"]["default"] == "gpt-5.5"
     assert written["model"]["provider"] == "openrouter"
+
+
+@pytest.mark.asyncio
+async def test_model_no_flag_is_session_scoped_by_default(tmp_path, monkeypatch):
+    """A plain ``/model X`` (no --global) does NOT persist to config.yaml.
+
+    This is the user-facing fix: switches are session-scoped unless the user
+    opts in with ``--global`` or sets ``model.persist_switch_by_default: true``.
+    """
+    cfg_path = _setup_isolated_home(
+        tmp_path,
+        monkeypatch,
+        {"default": "old-model", "provider": "openai-codex"},
+    )
+
+    result = await _make_runner()._handle_model_command(
+        _make_event("/model gpt-5.5")
+    )
+
+    assert result is not None
+    assert "gpt-5.5" in result
+    written = yaml.safe_load(cfg_path.read_text(encoding="utf-8", errors="replace"))
+    assert written["model"]["default"] == "old-model"
+
+
+@pytest.mark.asyncio
+async def test_model_session_flag_does_not_persist(tmp_path, monkeypatch):
+    """``/model X --session`` opts out of persistence even under the new default."""
+    cfg_path = _setup_isolated_home(
+        tmp_path,
+        monkeypatch,
+        {"default": "old-model", "provider": "openai-codex"},
+    )
+
+    result = await _make_runner()._handle_model_command(
+        _make_event("/model gpt-5.5 --session")
+    )
+
+    assert result is not None
+    assert "gpt-5.5" in result
+    written = yaml.safe_load(cfg_path.read_text(encoding="utf-8", errors="replace"))
+    # Config untouched — the session override is in-memory only.
+    assert written["model"]["default"] == "old-model"

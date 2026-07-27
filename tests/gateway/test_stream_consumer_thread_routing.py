@@ -103,7 +103,52 @@ class TestInitialReplyToId:
         await consumer._send_or_edit("Test")
 
         call_kwargs = adapter.send.call_args[1]
-        assert call_kwargs["metadata"] == metadata
+        assert call_kwargs["metadata"] == {
+            **metadata,
+            "reply_to_message_id": "om_msg_000",
+            "expect_edits": True,
+        }
+        assert metadata == {"thread_id": "omt_topic789"}
+
+    @pytest.mark.asyncio
+    async def test_final_first_send_marks_metadata_notify_true(self):
+        """Final streaming sends should use the existing notify=True marker."""
+        adapter = _make_adapter()
+        consumer = GatewayStreamConsumer(
+            adapter,
+            "chat_123",
+            metadata={"thread_id": "root_post_123"},
+            initial_reply_to_id="reply_post_456",
+        )
+
+        await consumer._send_or_edit("Final answer", finalize=True)
+
+        call_kwargs = adapter.send.call_args[1]
+        metadata = call_kwargs["metadata"]
+        assert metadata["thread_id"] == "root_post_123"
+        assert metadata["notify"] is True
+        assert "delivery_kind" not in metadata
+        assert "allow_flat_fallback" not in metadata
+
+    @pytest.mark.asyncio
+    async def test_nonfinal_first_send_does_not_mark_notify(self):
+        """Preview/interim streaming sends must not be notify-worthy."""
+        adapter = _make_adapter()
+        consumer = GatewayStreamConsumer(
+            adapter,
+            "chat_123",
+            metadata={"thread_id": "root_post_123"},
+            initial_reply_to_id="reply_post_456",
+        )
+
+        await consumer._send_or_edit("Preview", finalize=False)
+
+        metadata = adapter.send.call_args[1]["metadata"]
+        assert metadata == {
+            "thread_id": "root_post_123",
+            "reply_to_message_id": "reply_post_456",
+            "expect_edits": True,
+        }
 
 
 class TestOverflowFirstMessage:
@@ -143,7 +188,7 @@ class TestFeishuFallbackThreadRouting:
     async def test_create_uses_thread_id_when_available(self):
         """When reply_to=None and metadata has thread_id, message.create
         should use receive_id_type='thread_id'."""
-        from gateway.platforms.feishu import FeishuAdapter
+        from plugins.platforms.feishu.adapter import FeishuAdapter
 
         # We test the _send_raw_message method directly by mocking the client
         adapter = MagicMock(spec=FeishuAdapter)
@@ -160,14 +205,20 @@ class TestFeishuFallbackThreadRouting:
         adapter._client = mock_client
         adapter._build_create_message_body = FeishuAdapter._build_create_message_body
         adapter._build_create_message_request = FeishuAdapter._build_create_message_request
+        # _send_raw_message routes blocking SDK calls through _run_blocking
+        # (adapter-owned executor). On a MagicMock(spec=...) that method is
+        # auto-mocked and would swallow the real call, so wire a passthrough.
+        async def _run_blocking_passthrough(func, *args):
+            return func(*args)
+        adapter._run_blocking = _run_blocking_passthrough
 
         # Call _send_raw_message with reply_to=None and thread_id in metadata
-        import json
+        import orjson
         result = await FeishuAdapter._send_raw_message(
             adapter,
             chat_id="oc_main_chat",
             msg_type="text",
-            payload=json.dumps({"text": "hello"}),
+            payload=orjson.dumps({"text": "hello"}).decode('utf-8'),
             reply_to=None,
             metadata={"thread_id": "omt_topic_abc"},
         )
@@ -185,7 +236,7 @@ class TestFeishuFallbackThreadRouting:
         # receive_id should be the thread_id, not the chat_id
         receive_id = getattr(body, "receive_id", None)
         if receive_id is None and isinstance(body, str):
-            import json as _json
+            import orjson as _json
             receive_id = _json.loads(body).get("receive_id")
         assert receive_id == "omt_topic_abc", (
             f"Expected receive_id='omt_topic_abc', got '{receive_id}'"
@@ -200,7 +251,7 @@ class TestFeishuFallbackThreadRouting:
     async def test_create_uses_chat_id_when_no_thread(self):
         """When reply_to=None and metadata has no thread_id, message.create
         should use receive_id_type='chat_id' (original behavior)."""
-        from gateway.platforms.feishu import FeishuAdapter
+        from plugins.platforms.feishu.adapter import FeishuAdapter
 
         mock_client = MagicMock()
         mock_create_response = SimpleNamespace(
@@ -213,13 +264,16 @@ class TestFeishuFallbackThreadRouting:
         adapter._client = mock_client
         adapter._build_create_message_body = FeishuAdapter._build_create_message_body
         adapter._build_create_message_request = FeishuAdapter._build_create_message_request
+        async def _run_blocking_passthrough(func, *args):
+            return func(*args)
+        adapter._run_blocking = _run_blocking_passthrough
 
-        import json
+        import orjson
         result = await FeishuAdapter._send_raw_message(
             adapter,
             chat_id="oc_main_chat",
             msg_type="text",
-            payload=json.dumps({"text": "hello"}),
+            payload=orjson.dumps({"text": "hello"}).decode('utf-8'),
             reply_to=None,
             metadata=None,
         )

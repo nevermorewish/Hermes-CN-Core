@@ -2,7 +2,7 @@
 
 Replaces the identical DEBUG_MODE / _log_debug_call / _save_debug_log /
 get_debug_session_info boilerplate previously duplicated across web_tools,
-vision_tools, mixture_of_agents_tool, and image_generation_tool.
+vision_tools, and image_generation_tool.
 
 Usage in a tool module:
 
@@ -22,7 +22,7 @@ Usage in a tool module:
 """
 
 import datetime
-import json
+import orjson
 import logging
 import os
 import uuid
@@ -82,8 +82,8 @@ class DebugSession:
                 "total_calls": len(self._calls),
                 "tool_calls": self._calls,
             }
-            with open(filepath, "w", encoding="utf-8") as f:
-                json.dump(payload, f, indent=2, ensure_ascii=False)
+            with open(filepath, "w", encoding="utf-8", errors="replace") as f:
+                f.write(orjson.dumps(payload, option=orjson.OPT_INDENT_2).decode('utf-8'))
             logger.debug("%s debug log saved: %s", self.tool_name, filepath)
         except Exception as e:
             logger.error("Error saving %s debug log: %s", self.tool_name, e)

@@ -26,6 +26,9 @@ from pathlib import Path
 
 import pytest
 
+# Make pytest-asyncio plugin available to all test files
+pytest_plugins = ("pytest_asyncio",)
+
 # Ensure project root is importable
 PROJECT_ROOT = Path(__file__).parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -190,6 +193,7 @@ _HERMES_BEHAVIORAL_VARS = frozenset({
     "HERMES_INFERENCE_PROVIDER",
     "HERMES_TUI_PROVIDER",
     "HERMES_MANAGED",
+    "HERMES_MANAGED_DIR",
     "HERMES_DEV",
     "HERMES_CONTAINER",
     "HERMES_EPHEMERAL_SYSTEM_PROMPT",
@@ -213,6 +217,10 @@ _HERMES_BEHAVIORAL_VARS = frozenset({
     "HERMES_KANBAN_CLAIM_LOCK",
     "HERMES_KANBAN_DISPATCH_IN_GATEWAY",
     "HERMES_TENANT",
+    # Honcho host selection changes which nested config block wins. A local
+    # shell override leaked "myhost" into the full suite and flipped 20
+    # otherwise-unrelated config tests away from the default "hermes" host.
+    "HERMES_HONCHO_HOST",
     # Dashboard OAuth auth gate (PR #30156). When set, the bundled
     # dashboard-auth `nous` plugin auto-registers itself on plugin discovery,
     # which is triggered by any `/api/status` call. That leaks a provider
@@ -341,6 +349,13 @@ def _hermetic_environment(tmp_path, monkeypatch):
     for name in _HERMES_BEHAVIORAL_VARS:
         monkeypatch.delenv(name, raising=False)
 
+    # Honcho's fallback host/config resolution legitimately reads the user's
+    # global ~/.honcho/config.json. Keep HOME stable (subprocess tests depend
+    # on it), but pin the host so ordinary tests cannot inherit a developer's
+    # defaultHost and silently select the wrong nested config block. Tests of
+    # custom host resolution override/delete this explicitly.
+    monkeypatch.setenv("HERMES_HONCHO_HOST", "hermes")
+
     # 3. Redirect HERMES_HOME to a per-test tempdir. Code that reads
     #    ``~/.hermes/*`` via ``get_hermes_home()`` now gets the tempdir.
     #
@@ -378,6 +393,10 @@ def _hermetic_environment(tmp_path, monkeypatch):
     # should never perform that implicit network/bootstrap path; Tirith-specific
     # tests opt back in by patching the security config directly.
     monkeypatch.setenv("TIRITH_ENABLED", "false")
+    # P-028: never spawn the models.dev background prewarm thread in tests —
+    # it would fire a real network fetch off-thread (non-deterministic, and
+    # the prewarm is exercised by its own focused tests instead).
+    monkeypatch.setenv("HERMES_DISABLE_MODELS_DEV_PREWARM", "1")
 
     # 5. Reset plugin singleton so tests don't leak plugins from
     #    ~/.hermes/plugins/ (which, per step 3, is now empty — but the
@@ -453,7 +472,7 @@ def mock_config():
 def _ensure_current_event_loop(request):
     """Provide a default event loop for sync tests that call get_event_loop().
 
-    Python 3.11+ no longer guarantees a current loop for plain synchronous tests.
+    Python 3.14+ no longer guarantees a current loop for plain synchronous tests.
     A number of gateway tests still use asyncio.get_event_loop().run_until_complete(...).
     Ensure they always have a usable loop without interfering with pytest-asyncio's
     own loop management for @pytest.mark.asyncio tests.
@@ -534,6 +553,14 @@ def pytest_configure(config):  # noqa: D401 — pytest hook
         "behaviour — e.g. PTY tests that signal their own child).",
     )
 
+    # The pyproject addopts pin ``--timeout-method=signal`` relies on
+    # ``signal.SIGALRM``, which does not exist on Windows — pytest-timeout
+    # raises AttributeError at timer setup and the whole run aborts before any
+    # test executes. Fall back to the thread-based timer on Windows so the
+    # suite runs natively there (POSIX keeps the more reliable signal method).
+    if sys.platform == "win32" and getattr(config.option, "timeout_method", None) == "signal":
+        config.option.timeout_method = "thread"
+
 
 @pytest.fixture(autouse=True)
 def _live_system_guard(request, monkeypatch):
@@ -607,6 +634,13 @@ def _live_system_guard(request, monkeypatch):
     real_kill = _os.kill
 
     def _guarded_kill(pid, sig, *args, **kwargs):
+        # Signal 0 is a pure liveness probe — it cannot terminate anything.
+        # psutil.pid_exists() uses os.kill(pid, 0) on POSIX, and probing a
+        # just-killed grandchild that was reparented to init (zombie with a
+        # foreign parent chain) must not trip the guard. Flaked in CI on
+        # test_entire_tree_is_sigkilled_not_just_parent.
+        if int(sig) == 0:
+            return real_kill(pid, sig, *args, **kwargs)
         if _is_own_subtree(int(pid)):
             return real_kill(pid, sig, *args, **kwargs)
         raise RuntimeError(
@@ -632,6 +666,9 @@ def _live_system_guard(request, monkeypatch):
         own_pgid = _os.getpgrp()
 
         def _guarded_killpg(pgid, sig, *args, **kwargs):
+            # Signal 0 is a pure liveness probe — never destructive.
+            if int(sig) == 0:
+                return real_killpg(pgid, sig, *args, **kwargs)
             if int(pgid) == own_pgid or _is_own_subtree(int(pgid)):
                 return real_killpg(pgid, sig, *args, **kwargs)
             raise RuntimeError(
@@ -730,6 +767,41 @@ def _live_system_guard(request, monkeypatch):
                 "targeting hermes/python could hit the live gateway. "
                 "Mark with @pytest.mark.live_system_guard_bypass if "
                 "intentional."
+            )
+        # Block any subprocess that would run `hermes update` (or the
+        # equivalent `python -m hermes_cli.main update`).  These commands
+        # run `git fetch origin + git pull` against the REAL checkout,
+        # overwriting files like pyproject.toml mid-test-run and corrupting
+        # every subsequent subprocess that reads them.  The corruption is
+        # especially insidious because the spawned process uses setsid/
+        # start_new_session=True, making it invisible to pytest's process
+        # tree (PPid=1) and nearly impossible to trace without explicit
+        # inotify/SHA watchdogs.  Any test that legitimately needs to exercise
+        # the update-spawn path must mock subprocess.Popen explicitly.
+        cmd_str = _cmd_to_string(cmd)
+        low = cmd_str.lower()
+        if "update" in low and (
+            # hermes update / hermes update --gateway / setsid bash -c ... hermes update
+            ("hermes" in low and "update" in low.split())
+            or
+            # python -m hermes_cli.main update --gateway
+            ("hermes_cli" in low and "update" in low.split())
+            or
+            # venv/bin/hermes update  (absolute path variant used in tests)
+            (".venv/bin/hermes" in low and "update" in low)
+        ):
+            raise RuntimeError(
+                f"tests/conftest.py live-system guard: blocked "
+                f"subprocess.{name}({cmd!r}) — this command would run "
+                "`hermes update` against the real checkout, fetching "
+                "from origin and overwriting repo files (e.g. "
+                "pyproject.toml) mid-test-run. This corrupts every "
+                "subsequent subprocess in the same runner. "
+                "Mock subprocess.Popen (and subprocess.run if used) "
+                "in the test instead, or mark with "
+                "@pytest.mark.live_system_guard_bypass if genuinely "
+                "needed (e.g. an integration test testing the update "
+                "flow against a dedicated throwaway repo)."
             )
 
     def _wrap_subprocess(name, real):

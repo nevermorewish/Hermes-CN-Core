@@ -116,7 +116,7 @@ def _ensure_uv_path() -> Optional[str]:
         version = subprocess.run(
             [result, "--version"],
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             check=False,
         ).stdout.strip()
         print(f"  ✓ Managed uv installed ({version})")
@@ -171,14 +171,14 @@ def update_managed_uv() -> Optional[str]:
     result = subprocess.run(
         [existing, "self", "update"],
         capture_output=True,
-        text=True,
+        text=True, encoding="utf-8", errors="replace",
         check=False,
     )
     if result.returncode == 0:
         version = subprocess.run(
             [existing, "--version"],
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             check=False,
         ).stdout.strip()
         print(f"  ✓ Managed uv updated ({version})")
@@ -242,7 +242,8 @@ def _install_uv_posix(env: dict[str, str]) -> None:
 def _install_uv_windows(env: dict[str, str]) -> None:
     """Invoke the PowerShell installer."""
     refresh_env_from_registry()
-    cmd = (
+    from tools.environments.windows_env import ps_with_utf8
+    cmd = ps_with_utf8(
         'irm https://astral.sh/uv/install.ps1 | iex'
     )
     subprocess.run(
@@ -250,6 +251,9 @@ def _install_uv_windows(env: dict[str, str]) -> None:
         env=env,
         check=True,
         capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
     )
 
 def rebuild_venv(uv_bin: str, venv_dir: Path, python_version: str = "3.11") -> bool:

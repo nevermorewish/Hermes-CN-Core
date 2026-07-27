@@ -28,9 +28,9 @@ No meet.google.com URL → exits non-zero. Any URL that doesn't start with
 
 from __future__ import annotations
 
-import json
+import orjson
 import os
-import re
+from agent.re_compat import re
 import signal
 import sys
 import threading
@@ -132,7 +132,7 @@ class _BotState:
         ts = time.strftime("%H:%M:%S", time.localtime(self.last_caption_at))
         line = f"[{ts}] {speaker}: {text}\n"
         # Atomic-ish append — good enough for a single-writer.
-        with self.transcript_path.open("a", encoding="utf-8") as f:
+        with self.transcript_path.open("a", encoding="utf-8", errors="replace") as f:
             f.write(line)
         self._flush()
 
@@ -164,7 +164,7 @@ class _BotState:
             "leaveReason": self.leave_reason,
         }
         tmp = self.status_path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        tmp.write_text(orjson.dumps(data, option=orjson.OPT_INDENT_2).decode('utf-8'), encoding="utf-8")
         tmp.replace(self.status_path)
 
     def set(self, **kwargs) -> None:
@@ -425,15 +425,14 @@ def _mac_audio_device_index(device_name: str) -> str:
         out = _sp.run(
             ["ffmpeg", "-f", "avfoundation", "-list_devices", "true", "-i", ""],
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             timeout=10,
         )
     except Exception:
         return "0"
     # ffmpeg prints the table on stderr. Lines look like:
     #   [AVFoundation indev @ 0x...] [0] BlackHole 2ch
-    import re as _re
-
+    from agent.re_compat import re as _re
     needle = device_name.strip().lower()
     for line in (out.stderr or "").splitlines():
         m = _re.search(r"\[(\d+)\]\s+(.+)$", line)
@@ -699,7 +698,13 @@ def run_bot() -> int:  # noqa: C901 — orchestration, explicit branches
 
             context.close()
             browser.close()
-            # v2: teardown realtime speaker + audio bridge.
+            # v2: teardown PCM pump, speaker thread, and audio bridge.
+            if rt.get("pcm_pump"):
+                try:
+                    rt["pcm_pump"].terminate()
+                    rt["pcm_pump"].wait(timeout=3)
+                except Exception:
+                    pass
             if rt["speaker_stop"]:
                 try:
                     rt["speaker_stop"]()

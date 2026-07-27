@@ -20,8 +20,9 @@ chain provenance proof.  Installation runs in a background thread so startup
 never blocks.
 """
 
+import xxhash
 import hashlib
-import json
+import orjson
 import logging
 import os
 import platform
@@ -34,7 +35,7 @@ import threading
 import time
 import urllib.request
 
-from hermes_constants import get_hermes_home
+from hermes_constants import get_hermes_home, get_managed_tools_dir
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +98,35 @@ _resolved_path: str | None | bool = None
 _INSTALL_FAILED = False  # sentinel: distinct from "not yet tried"
 _install_failure_reason: str = ""  # reason tag when _resolved_path is _INSTALL_FAILED
 
+# Circuit breaker: after _CRASH_LIMIT consecutive spawn/execution failures,
+# disable tirith for the rest of the process to prevent agent hangs (#41400).
+# Reset on successful execution (see _record_tirith_crash / check_command_security).
+#
+# Thread safety: _crash_count and _circuit_open are module-level globals
+# mutated without a lock. check_command_security can be called from
+# concurrent agent threads (gateway multi-session). The race is benign —
+# at worst two threads both increment past _CRASH_LIMIT and both set
+# _circuit_open = True, opening the breaker one call early. No data
+# corruption or security bypass is possible. This intentionally matches
+# the lock-free style of error counters in mcp_tool.py rather than the
+# locked _warn_once pattern, because the worst case is harmless.
+_CRASH_LIMIT = 3
+_crash_count: int = 0
+_circuit_open: bool = False
+
+
+def _record_tirith_crash() -> None:
+    """Increment the crash counter and open the circuit breaker if needed."""
+    global _crash_count, _circuit_open
+    _crash_count += 1
+    if _crash_count >= _CRASH_LIMIT:
+        _circuit_open = True
+        logger.warning(
+            "tirith circuit breaker opened after %d consecutive failures; "
+            "disabling for the rest of the process",
+            _crash_count,
+        )
+
 # Background install thread coordination
 _install_lock = threading.Lock()
 _install_thread: threading.Thread | None = None
@@ -154,7 +184,7 @@ def _read_failure_reason() -> str | None:
         mtime = os.path.getmtime(p)
         if (time.time() - mtime) >= _MARKER_TTL:
             return None
-        with open(p, "r", encoding="utf-8") as f:
+        with open(p, "r", encoding="utf-8", errors="replace") as f:
             return f.read().strip()
     except OSError:
         return None
@@ -206,8 +236,19 @@ def _clear_install_failed():
         pass
 
 
+def _hermes_tools_dir() -> str:
+    """Return the Hermes-managed external tools directory, creating it if needed."""
+    d = str(get_managed_tools_dir())
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
 def _hermes_bin_dir() -> str:
-    """Return $HERMES_HOME/bin, creating it if needed."""
+    """Return $HERMES_HOME/bin, creating it if needed.
+
+    Deprecated: new installs keep external binaries in ``get_managed_tools_dir``.
+    This helper remains for backward compatibility with existing installs.
+    """
     d = os.path.join(_get_hermes_home(), "bin")
     os.makedirs(d, exist_ok=True)
     return d
@@ -286,8 +327,9 @@ def _verify_cosign(checksums_path: str, sig_path: str, cert_path: str) -> bool |
              "--certificate-oidc-issuer", _COSIGN_ISSUER,
              checksums_path],
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             timeout=15,
+            stdin=subprocess.DEVNULL,
         )
         if result.returncode == 0:
             logger.info("cosign provenance verification passed")
@@ -304,7 +346,7 @@ def _verify_cosign(checksums_path: str, sig_path: str, cert_path: str) -> bool |
 def _verify_checksum(archive_path: str, checksums_path: str, archive_name: str) -> bool:
     """Verify SHA-256 of the archive against checksums.txt."""
     expected = None
-    with open(checksums_path, encoding="utf-8") as f:
+    with open(checksums_path, encoding="utf-8", errors="replace") as f:
         for line in f:
             # Format: "<hash>  <filename>"
             parts = line.strip().split("  ", 1)
@@ -371,7 +413,11 @@ def _install_tirith(*, log_failures: bool = True) -> tuple[str | None, str]:
     archive_name = f"tirith-{target}.tar.gz"
     base_url = f"https://github.com/{_REPO}/releases/latest/download"
 
-    tmpdir = tempfile.mkdtemp(prefix="tirith-install-")
+    try:
+        tmpdir = tempfile.mkdtemp(prefix="tirith-install-")
+    except OSError as exc:
+        log("tirith install failed: cannot create temp dir: %s", exc)
+        return None, "no_space"
     try:
         archive_path = os.path.join(tmpdir, archive_name)
         checksums_path = os.path.join(tmpdir, "checksums.txt")
@@ -424,7 +470,7 @@ def _install_tirith(*, log_failures: bool = True) -> tuple[str | None, str]:
             if src is None:
                 return None, reason
 
-        dest = os.path.join(_hermes_bin_dir(), "tirith")
+        dest = os.path.join(_hermes_tools_dir(), "tirith")
         try:
             shutil.move(src, dest)
         except OSError:
@@ -463,9 +509,10 @@ def _resolve_tirith_path(configured_path: str) -> str:
     auto-download a different binary.
 
     For the default "tirith":
-    1. PATH lookup via shutil.which
-    2. $HERMES_HOME/bin/tirith (previously auto-installed)
-    3. Auto-install from GitHub releases → $HERMES_HOME/bin/tirith
+    1. $HERMES_HOME/tools/tirith (managed copy)
+    2. PATH lookup via shutil.which
+    3. $HERMES_HOME/bin/tirith (legacy managed copy)
+    4. Auto-install from GitHub releases → $HERMES_HOME/tools/tirith
 
     Failed installs are cached for the process lifetime (and persisted to
     disk for 24h) to avoid repeated network attempts.
@@ -507,6 +554,13 @@ def _resolve_tirith_path(configured_path: str) -> str:
     # Default "tirith" — always re-run cheap local checks so a manual
     # install is picked up even after a previous network failure (P2 fix:
     # long-lived gateway/CLI recovers without restart).
+    hermes_tools = os.path.join(_hermes_tools_dir(), "tirith")
+    if os.path.isfile(hermes_tools) and os.access(hermes_tools, os.X_OK):
+        _resolved_path = hermes_tools
+        _install_failure_reason = ""
+        _clear_install_failed()
+        return hermes_tools
+
     found = shutil.which("tirith")
     if found:
         _resolved_path = found
@@ -572,6 +626,12 @@ def _background_install(*, log_failures: bool = True):
             return
 
         # Re-check local paths (may have been installed by another process)
+        hermes_tools = os.path.join(_hermes_tools_dir(), "tirith")
+        if os.path.isfile(hermes_tools) and os.access(hermes_tools, os.X_OK):
+            _resolved_path = hermes_tools
+            _install_failure_reason = ""
+            return
+
         found = shutil.which("tirith")
         if found:
             _resolved_path = found
@@ -641,6 +701,13 @@ def ensure_installed(*, log_failures: bool = True):
         return None
 
     # Default "tirith" — quick local checks first (no network)
+    hermes_tools = os.path.join(_hermes_tools_dir(), "tirith")
+    if os.path.isfile(hermes_tools) and os.access(hermes_tools, os.X_OK):
+        _resolved_path = hermes_tools
+        _install_failure_reason = ""
+        _clear_install_failed()
+        return hermes_tools
+
     found = shutil.which("tirith")
     if found:
         _resolved_path = found
@@ -703,10 +770,20 @@ def check_command_security(command: str) -> dict:
     Returns:
         {"action": "allow"|"warn"|"block", "findings": [...], "summary": str}
     """
+    global _crash_count, _circuit_open
+
     cfg = _load_security_config()
 
     if not cfg["tirith_enabled"]:
         return {"action": "allow", "findings": [], "summary": ""}
+
+    # Circuit breaker: if tirith has crashed _CRASH_LIMIT times in a row,
+    # stop trying for the rest of the process.  Without this, a corrupted
+    # or missing binary causes every tool call to hit the same spawn failure
+    # → fail-open → agent retry loop, hanging the user for 20+ minutes
+    # (issue #41400).
+    if _circuit_open:
+        return {"action": "allow", "findings": [], "summary": "tirith disabled (circuit breaker)"}
 
     # Unsupported platform (Windows etc.) — tirith has no binary here and
     # never will. Skip the resolver entirely so we don't even try to spawn.
@@ -732,8 +809,9 @@ def check_command_security(command: str) -> dict:
             [tirith_path, "check", "--json", "--non-interactive",
              "--shell", "posix", "--", command],
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             timeout=timeout,
+            stdin=subprocess.DEVNULL,
         )
     except OSError as exc:
         # Covers FileNotFoundError, PermissionError, exec format error.
@@ -744,6 +822,7 @@ def check_command_security(command: str) -> dict:
         # install marked failed for the day).
         spawn_key = f"tirith_spawn_failed:{type(exc).__name__}:{getattr(exc, 'errno', '')}"
         _warn_once(spawn_key, "tirith spawn failed: %s", exc)
+        _record_tirith_crash()
         if fail_open:
             return {"action": "allow", "findings": [], "summary": f"tirith unavailable: {exc}"}
         return {"action": "block", "findings": [], "summary": f"tirith spawn failed (fail-closed): {exc}"}
@@ -753,6 +832,7 @@ def check_command_security(command: str) -> dict:
             "tirith timed out after %ds",
             timeout,
         )
+        _record_tirith_crash()
         if fail_open:
             return {"action": "allow", "findings": [], "summary": f"tirith timed out ({timeout}s)"}
         return {"action": "block", "findings": [], "summary": "tirith timed out (fail-closed)"}
@@ -761,13 +841,17 @@ def check_command_security(command: str) -> dict:
     exit_code = result.returncode
     if exit_code == 0:
         action = "allow"
+        # Successful execution — reset circuit breaker
+        _crash_count = 0
     elif exit_code == 1:
         action = "block"
     elif exit_code == 2:
         action = "warn"
     else:
-        # Unknown exit code — respect fail_open
+        # Unknown exit code (includes signal-killed processes like -11/SIGSEGV)
+        # — respect fail_open
         logger.warning("tirith returned unexpected exit code %d", exit_code)
+        _record_tirith_crash()
         if fail_open:
             return {"action": "allow", "findings": [], "summary": f"tirith exit code {exit_code} (fail-open)"}
         return {"action": "block", "findings": [], "summary": f"tirith exit code {exit_code} (fail-closed)"}
@@ -776,11 +860,11 @@ def check_command_security(command: str) -> dict:
     findings = []
     summary = ""
     try:
-        data = json.loads(result.stdout) if result.stdout.strip() else {}
+        data = orjson.loads(result.stdout) if result.stdout.strip() else {}
         raw_findings = data.get("findings", [])
         findings = raw_findings[:_MAX_FINDINGS]
         summary = (data.get("summary", "") or "")[:_MAX_SUMMARY_LEN]
-    except (json.JSONDecodeError, AttributeError):
+    except (orjson.JSONDecodeError, AttributeError):
         # JSON parse failure degrades findings/summary, not the verdict
         logger.debug("tirith JSON parse failed, using exit code only")
         if action == "block":

@@ -1,11 +1,14 @@
 """Tests for macOS Homebrew PATH discovery in browser_tool.py."""
 
-import json
+import orjson
 import os
+import sys
 from pathlib import Path
 from unittest.mock import patch, MagicMock, mock_open
 
 import pytest
+
+_win32 = pytest.mark.skipif(sys.platform == 'win32', reason="Windows baseline: Homebrew paths are macOS-specific")
 
 from tools.browser_tool import (
     _discover_homebrew_node_dirs,
@@ -29,6 +32,7 @@ def _clear_browser_caches():
     _bt._agent_browser_resolved = False
 
 
+@_win32
 class TestSanePath:
     """Verify _SANE_PATH includes fallback directories used by browser_tool."""
 
@@ -51,6 +55,7 @@ class TestSanePath:
         assert "/bin" in path_parts
 
 
+@_win32
 class TestDiscoverHomebrewNodeDirs:
     """Tests for _discover_homebrew_node_dirs()."""
 
@@ -96,12 +101,14 @@ class TestDiscoverHomebrewNodeDirs:
             assert _discover_homebrew_node_dirs() == ()
 
 
+@_win32
 class TestFindAgentBrowser:
     """Tests for _find_agent_browser() Homebrew path search."""
 
     def test_finds_in_current_path(self):
         """Should return result from shutil.which if available on current PATH."""
-        with patch("shutil.which", return_value="/usr/local/bin/agent-browser"):
+        with patch("shutil.which", return_value="/usr/local/bin/agent-browser"), \
+             patch("tools.browser_tool.agent_browser_runnable", return_value=True):
             assert _find_agent_browser() == "/usr/local/bin/agent-browser"
 
     def test_finds_in_homebrew_bin(self):
@@ -112,6 +119,7 @@ class TestFindAgentBrowser:
             return None
 
         with patch("shutil.which", side_effect=mock_which), \
+             patch("tools.browser_tool.agent_browser_runnable", return_value=True), \
              patch("os.path.isdir", return_value=True), \
              patch(
                  "tools.browser_tool._discover_homebrew_node_dirs",
@@ -207,6 +215,7 @@ class TestFindAgentBrowser:
                 _find_agent_browser()
 
 
+@_win32
 class TestBrowserRequirements:
     def test_cdp_override_does_not_require_agent_browser_cli(self, monkeypatch):
         monkeypatch.setenv("BROWSER_CDP_URL", "ws://127.0.0.1:9222/devtools/browser/test")
@@ -220,16 +229,17 @@ class TestBrowserRequirements:
         monkeypatch.setenv("PREFIX", "/data/data/com.termux/files/usr")
         monkeypatch.setattr("tools.browser_tool._is_camofox_mode", lambda: False)
         monkeypatch.setattr("tools.browser_tool._get_cloud_provider", lambda: None)
-        monkeypatch.setattr("tools.browser_tool._find_agent_browser", lambda: "npx agent-browser")
+        monkeypatch.setattr("tools.browser_tool._find_agent_browser", lambda **_kw: "npx agent-browser")
 
         assert check_browser_requirements() is False
 
 
+@_win32
 class TestRunBrowserCommandTermuxFallback:
     def test_termux_local_mode_rejects_bare_npx_fallback(self, monkeypatch):
         monkeypatch.setenv("TERMUX_VERSION", "0.118.3")
         monkeypatch.setenv("PREFIX", "/data/data/com.termux/files/usr")
-        monkeypatch.setattr("tools.browser_tool._find_agent_browser", lambda: "npx agent-browser")
+        monkeypatch.setattr("tools.browser_tool._find_agent_browser", lambda **_kw: "npx agent-browser")
         monkeypatch.setattr("tools.browser_tool._get_cloud_provider", lambda: None)
 
         result = _run_browser_command("task-1", "navigate", ["https://example.com"])
@@ -239,6 +249,7 @@ class TestRunBrowserCommandTermuxFallback:
         assert "agent-browser install" in result["error"]
 
 
+@_win32
 class TestRunBrowserCommandPathConstruction:
     """Verify _run_browser_command() includes Homebrew node dirs in subprocess PATH."""
 
@@ -260,7 +271,7 @@ class TestRunBrowserCommandPathConstruction:
             "session_id": "test-id",
             "cdp_url": None,
         }
-        fake_json = json.dumps({"success": True})
+        fake_json = orjson.dumps({"success": True}).decode('utf-8')
         browser_path = "/Users/test/Library/Application Support/hermes/node_modules/.bin/agent-browser"
         hermes_home = str(tmp_path / "hermes-home")
 
@@ -313,7 +324,7 @@ class TestRunBrowserCommandPathConstruction:
             "session_id": "test-id",
             "cdp_url": None,
         }
-        fake_json = json.dumps({"success": True})
+        fake_json = orjson.dumps({"success": True}).decode('utf-8')
         hermes_home = str(tmp_path / "hermes-home")
 
         with patch("tools.browser_tool._find_agent_browser", return_value="npx agent-browser"), \
@@ -376,7 +387,7 @@ class TestRunBrowserCommandPathConstruction:
         }
 
         # Write fake JSON output to the stdout temp file
-        fake_json = json.dumps({"success": True})
+        fake_json = orjson.dumps({"success": True}).decode('utf-8')
         stdout_file = tmp_path / "stdout"
         stdout_file.write_text(fake_json)
 
@@ -435,7 +446,7 @@ class TestRunBrowserCommandPathConstruction:
             "cdp_url": None,
         }
 
-        fake_json = json.dumps({"success": True})
+        fake_json = orjson.dumps({"success": True}).decode('utf-8')
         real_isdir = os.path.isdir
 
         def selective_isdir(p):
@@ -481,7 +492,7 @@ class TestRunBrowserCommandPathConstruction:
             "cdp_url": None,
         }
 
-        fake_json = json.dumps({"success": True})
+        fake_json = orjson.dumps({"success": True}).decode('utf-8')
         real_isdir = os.path.isdir
 
         def selective_isdir(path):

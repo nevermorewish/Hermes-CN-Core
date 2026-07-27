@@ -85,14 +85,23 @@ def test_detect_windows_explicit_bash_returns_powershell():
 def test_detect_windows_auto_with_powershell_available():
     with mock.patch(SYSTEM, return_value="Windows"), _shell_type_env("auto"), mock.patch(
         SHUTIL_WHICH, side_effect=_which_matcher("powershell")
+    ), mock.patch(
+        "tools.environments.local._find_pwsh", return_value=None
     ):
         assert _detect_shell_for_description() == "powershell"
 
 
-def test_detect_windows_auto_always_returns_powershell():
-    # Windows always uses PowerShell; PATH probing is not needed since
-    # _resolve_shell() uses powershell.exe which ships with the OS.
+def test_detect_windows_auto_pwsh_available_returns_pwsh():
     with mock.patch(SYSTEM, return_value="Windows"), _shell_type_env("auto"), mock.patch(
+        "tools.environments.local._find_pwsh", return_value=r"C:\Program Files\PowerShell\7\pwsh.exe"
+    ):
+        assert _detect_shell_for_description() == "pwsh"
+
+
+def test_detect_windows_auto_pwsh_unavailable_returns_powershell():
+    with mock.patch(SYSTEM, return_value="Windows"), _shell_type_env("auto"), mock.patch(
+        "tools.environments.local._find_pwsh", return_value=None
+    ), mock.patch(
         SHUTIL_WHICH, return_value=None
     ):
         assert _detect_shell_for_description() == "powershell"
@@ -102,22 +111,24 @@ def test_detect_windows_default_unset_behaves_as_auto():
     # HERMES_SHELL_TYPE unset → defaults to "auto" → powershell when available.
     with mock.patch(SYSTEM, return_value="Windows"), _shell_type_env(None), mock.patch(
         SHUTIL_WHICH, side_effect=_which_matcher("powershell")
+    ), mock.patch(
+        "tools.environments.local._find_pwsh", return_value=None
     ):
         assert _detect_shell_for_description() == "powershell"
 
 
-def test_detect_windows_explicit_pwsh_reports_powershell_even_if_missing():
-    # Explicit pwsh/powershell request reports "powershell" so _resolve_shell()
-    # can raise a clear error downstream, rather than silently degrading to bash.
+def test_detect_windows_explicit_pwsh_reports_pwsh_if_available():
     with mock.patch(SYSTEM, return_value="Windows"), _shell_type_env("pwsh"), mock.patch(
-        SHUTIL_WHICH, return_value=None
+        "tools.environments.local._find_pwsh", return_value=r"C:\pwsh\pwsh.exe"
     ):
-        assert _detect_shell_for_description() == "powershell"
+        assert _detect_shell_for_description() == "pwsh"
 
 
 def test_detect_windows_explicit_powershell_reports_powershell_even_if_missing():
     with mock.patch(SYSTEM, return_value="Windows"), _shell_type_env("powershell"), mock.patch(
         SHUTIL_WHICH, return_value=None
+    ), mock.patch(
+        "tools.environments.local._find_pwsh", return_value=None
     ):
         assert _detect_shell_for_description() == "powershell"
 
@@ -125,13 +136,17 @@ def test_detect_windows_explicit_powershell_reports_powershell_even_if_missing()
 def test_detect_windows_powershell_alias_available():
     with mock.patch(SYSTEM, return_value="Windows"), _shell_type_env("powershell"), mock.patch(
         SHUTIL_WHICH, side_effect=_which_matcher("powershell")
+    ), mock.patch(
+        "tools.environments.local._find_pwsh", return_value=None
     ):
         assert _detect_shell_for_description() == "powershell"
 
 
 def test_detect_windows_unknown_shell_type_is_powershell():
     # Any non-bash shell type on Windows → powershell (bash raises downstream).
-    with mock.patch(SYSTEM, return_value="Windows"), _shell_type_env("fish"), mock.patch(SHUTIL_WHICH) as fp:
+    with mock.patch(SYSTEM, return_value="Windows"), _shell_type_env("fish"), mock.patch(SHUTIL_WHICH) as fp, mock.patch(
+        "tools.environments.local._find_pwsh", return_value=None
+    ):
         assert _detect_shell_for_description() == "powershell"
         fp.assert_not_called()
 
@@ -140,7 +155,9 @@ def test_detect_is_cached_until_cleared():
     # _detect_shell_for_description is @lru_cache-d and decides purely from
     # platform.system() + HERMES_SHELL_TYPE (no PATH probe), so observe caching
     # via the number of platform.system() calls.
-    with mock.patch(SYSTEM, return_value="Windows") as sysm, _shell_type_env("auto"):
+    with mock.patch(SYSTEM, return_value="Windows") as sysm, _shell_type_env("auto"), mock.patch(
+        "tools.environments.local._find_pwsh", return_value=None
+    ):
         assert _detect_shell_for_description() == "powershell"
         assert _detect_shell_for_description() == "powershell"
         assert sysm.call_count == 1  # second call served from lru_cache
@@ -175,6 +192,16 @@ def test_build_powershell_uses_powershell_sentence_and_cmdlet_refs():
     assert "Execute shell commands on a Linux environment." not in desc
 
 
+def test_build_pwsh_uses_pwsh_sentence():
+    with mock.patch(DETECT, return_value="pwsh"), mock.patch(SYSTEM, return_value="Windows"):
+        desc = _build_dynamic_terminal_description()["description"]
+    assert "PowerShell 7 (pwsh)" in desc
+    # pwsh still gets cmdlet-adapted references
+    assert "Do NOT use Get-Content/cat/type to read files" in desc
+    assert "Do NOT use Select-String/findstr to search" in desc
+    assert "Out-Host -Paging" in desc
+
+
 def test_build_non_windows_leaves_linux_references_intact():
     with mock.patch(DETECT, return_value="bash"), mock.patch(SYSTEM, return_value="Linux"):
         desc = _build_dynamic_terminal_description()["description"]
@@ -205,4 +232,9 @@ def test_static_description_contains_phrases_the_powershell_path_rewrites():
 def test_terminal_registered_with_dynamic_override():
     entry = registry.get_entry("terminal")
     assert entry is not None
-    assert entry.dynamic_schema_overrides is _build_dynamic_terminal_description
+    # Compare against the function on the CURRENT module object, not the one
+    # imported at this file's collection time: an earlier test may have
+    # reloaded tools.terminal_tool (importlib.reload), which re-registers the
+    # entry with the reloaded function and orphans our stale reference.
+    import tools.terminal_tool as live_terminal_tool
+    assert entry.dynamic_schema_overrides is live_terminal_tool._build_dynamic_terminal_description

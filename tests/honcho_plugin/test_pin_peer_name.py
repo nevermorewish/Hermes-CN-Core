@@ -15,8 +15,22 @@ chosen ``user_peer_id`` can be asserted without touching the network.
 """
 
 import hashlib
-import json
+import os
+import orjson
 from unittest.mock import MagicMock
+
+
+def _bump_mtime(path):
+    """Force a distinct st_mtime_ns after rewriting a config file.
+
+    The gateway memoizes Honcho cache-busting values keyed by
+    (path, st_mtime_ns). On Windows the mtime tick is coarse enough that two
+    writes within one test can share a timestamp, leaving the memo
+    un-busted. Bump the mtime explicitly so the test asserts the memoization
+    contract instead of relying on timing luck.
+    """
+    st = path.stat()
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
 
 
 from plugins.memory.honcho.client import HonchoClientConfig
@@ -36,11 +50,11 @@ class TestPinPeerNameConfigParsing:
 
     def test_root_level_true(self, tmp_path, monkeypatch):
         config_file = tmp_path / "honcho.json"
-        config_file.write_text(json.dumps({
+        config_file.write_text(orjson.dumps({
             "apiKey": "k",
             "peerName": "Igor",
             "pinPeerName": True,
-        }))
+        }).decode('utf-8'))
         monkeypatch.setenv("HERMES_HOME", str(tmp_path / "isolated"))
 
         config = HonchoClientConfig.from_global_config(config_path=config_file)
@@ -50,13 +64,13 @@ class TestPinPeerNameConfigParsing:
     def test_host_block_true(self, tmp_path, monkeypatch):
         """Host-level flag works the same as root-level."""
         config_file = tmp_path / "honcho.json"
-        config_file.write_text(json.dumps({
+        config_file.write_text(orjson.dumps({
             "apiKey": "k",
             "peerName": "Igor",
             "hosts": {
                 "hermes": {"pinPeerName": True},
             },
-        }))
+        }).decode('utf-8'))
         monkeypatch.setenv("HERMES_HOME", str(tmp_path / "isolated"))
 
         config = HonchoClientConfig.from_global_config(config_path=config_file)
@@ -65,14 +79,14 @@ class TestPinPeerNameConfigParsing:
     def test_host_block_overrides_root(self, tmp_path, monkeypatch):
         """Host block wins over root — matches how every other flag behaves."""
         config_file = tmp_path / "honcho.json"
-        config_file.write_text(json.dumps({
+        config_file.write_text(orjson.dumps({
             "apiKey": "k",
             "peerName": "Igor",
             "pinPeerName": True,
             "hosts": {
                 "hermes": {"pinPeerName": False},
             },
-        }))
+        }).decode('utf-8'))
         monkeypatch.setenv("HERMES_HOME", str(tmp_path / "isolated"))
 
         config = HonchoClientConfig.from_global_config(config_path=config_file)
@@ -83,11 +97,11 @@ class TestPinPeerNameConfigParsing:
 
     def test_explicit_false_parses(self, tmp_path, monkeypatch):
         config_file = tmp_path / "honcho.json"
-        config_file.write_text(json.dumps({
+        config_file.write_text(orjson.dumps({
             "apiKey": "k",
             "peerName": "Igor",
             "pinPeerName": False,
-        }))
+        }).decode('utf-8'))
         monkeypatch.setenv("HERMES_HOME", str(tmp_path / "isolated"))
 
         config = HonchoClientConfig.from_global_config(config_path=config_file)
@@ -102,25 +116,25 @@ class TestRuntimePeerMappingConfigParsing:
 
     def test_root_level_aliases_and_prefix_parse(self, tmp_path):
         config_file = tmp_path / "honcho.json"
-        config_file.write_text(json.dumps({
+        config_file.write_text(orjson.dumps({
             "apiKey": "k",
             "userPeerAliases": {
-                " 86701400 ": " Igor ",
+                " 7654321 ": " Igor ",
                 "": "ignored",
                 "empty-value": " ",
                 "null-value": None,
             },
             "runtimePeerPrefix": "telegram_",
-        }))
+        }).decode('utf-8'))
 
         config = HonchoClientConfig.from_global_config(config_path=config_file)
 
-        assert config.user_peer_aliases == {"86701400": "Igor"}
+        assert config.user_peer_aliases == {"7654321": "Igor"}
         assert config.runtime_peer_prefix == "telegram_"
 
     def test_host_aliases_override_root_aliases_as_whole_map(self, tmp_path):
         config_file = tmp_path / "honcho.json"
-        config_file.write_text(json.dumps({
+        config_file.write_text(orjson.dumps({
             "apiKey": "k",
             "userPeerAliases": {"root-user": "root-peer"},
             "hosts": {
@@ -128,7 +142,7 @@ class TestRuntimePeerMappingConfigParsing:
                     "userPeerAliases": {"host-user": "host-peer"},
                 },
             },
-        }))
+        }).decode('utf-8'))
 
         config = HonchoClientConfig.from_global_config(config_path=config_file)
 
@@ -136,7 +150,7 @@ class TestRuntimePeerMappingConfigParsing:
 
     def test_host_empty_aliases_disable_root_aliases(self, tmp_path):
         config_file = tmp_path / "honcho.json"
-        config_file.write_text(json.dumps({
+        config_file.write_text(orjson.dumps({
             "apiKey": "k",
             "userPeerAliases": {"root-user": "root-peer"},
             "hosts": {
@@ -144,7 +158,7 @@ class TestRuntimePeerMappingConfigParsing:
                     "userPeerAliases": {},
                 },
             },
-        }))
+        }).decode('utf-8'))
 
         config = HonchoClientConfig.from_global_config(config_path=config_file)
 
@@ -152,7 +166,7 @@ class TestRuntimePeerMappingConfigParsing:
 
     def test_host_empty_prefix_disables_root_prefix(self, tmp_path):
         config_file = tmp_path / "honcho.json"
-        config_file.write_text(json.dumps({
+        config_file.write_text(orjson.dumps({
             "apiKey": "k",
             "runtimePeerPrefix": "telegram_",
             "hosts": {
@@ -160,7 +174,7 @@ class TestRuntimePeerMappingConfigParsing:
                     "runtimePeerPrefix": "",
                 },
             },
-        }))
+        }).decode('utf-8'))
 
         config = HonchoClientConfig.from_global_config(config_path=config_file)
 
@@ -168,10 +182,10 @@ class TestRuntimePeerMappingConfigParsing:
 
     def test_malformed_alias_config_is_ignored(self, tmp_path):
         config_file = tmp_path / "honcho.json"
-        config_file.write_text(json.dumps({
+        config_file.write_text(orjson.dumps({
             "apiKey": "k",
             "userPeerAliases": ["not", "a", "map"],
-        }))
+        }).decode('utf-8'))
 
         config = HonchoClientConfig.from_global_config(config_path=config_file)
 
@@ -226,12 +240,12 @@ class TestPeerResolutionOrder:
         mgr = HonchoSessionManager(
             honcho=MagicMock(),
             config=self._config(peer_name="Igor", pin_peer_name=False),
-            runtime_user_peer_name="86701400",  # e.g. Telegram UID
+            runtime_user_peer_name="7654321",  # e.g. Telegram UID
         )
         _patch_manager_for_resolution_test(mgr)
 
-        session = mgr.get_or_create("telegram:86701400")
-        assert session.user_peer_id == "86701400", (
+        session = mgr.get_or_create("telegram:7654321")
+        assert session.user_peer_id == "7654321", (
             "pin_peer_name=False is the multi-user default — the gateway's "
             "platform-native user ID must win so each user gets their own "
             "peer scope.  If this regresses, every Telegram/Discord/Slack "
@@ -245,14 +259,14 @@ class TestPeerResolutionOrder:
             config=self._config(
                 peer_name="Igor",
                 pin_peer_name=False,
-                user_peer_aliases={"86701400": "Igor"},
+                user_peer_aliases={"7654321": "Igor"},
                 runtime_peer_prefix="telegram_",
             ),
-            runtime_user_peer_name="86701400",
+            runtime_user_peer_name="7654321",
         )
         _patch_manager_for_resolution_test(mgr)
 
-        session = mgr.get_or_create("telegram:86701400")
+        session = mgr.get_or_create("telegram:7654321")
         assert session.user_peer_id == "Igor"
 
     def test_unknown_runtime_id_uses_prefix(self):
@@ -264,12 +278,12 @@ class TestPeerResolutionOrder:
                 pin_peer_name=False,
                 runtime_peer_prefix="telegram_",
             ),
-            runtime_user_peer_name="86701400",
+            runtime_user_peer_name="7654321",
         )
         _patch_manager_for_resolution_test(mgr)
 
-        session = mgr.get_or_create("telegram:86701400")
-        assert session.user_peer_id == "telegram_86701400"
+        session = mgr.get_or_create("telegram:7654321")
+        assert session.user_peer_id == "telegram_7654321"
 
     def test_prefixed_runtime_id_hashes_when_sanitization_is_lossy(self):
         """Generated prefixed IDs avoid merges caused by lossy sanitization."""
@@ -291,43 +305,43 @@ class TestPeerResolutionOrder:
 
     def test_prefixed_runtime_id_hashes_when_it_collides_with_peer_name(self):
         """Unknown generated peers should not silently merge into peerName."""
-        raw_peer_id = "telegram_86701400"
+        raw_peer_id = "telegram_7654321"
         expected_hash = hashlib.sha256(raw_peer_id.encode("utf-8")).hexdigest()[:8]
         mgr = HonchoSessionManager(
             honcho=MagicMock(),
             config=self._config(
-                peer_name="telegram_86701400",
+                peer_name="telegram_7654321",
                 pin_peer_name=False,
                 runtime_peer_prefix="telegram_",
             ),
-            runtime_user_peer_name="86701400",
+            runtime_user_peer_name="7654321",
         )
         _patch_manager_for_resolution_test(mgr)
 
-        session = mgr.get_or_create("telegram:86701400")
-        assert session.user_peer_id == f"telegram_86701400-{expected_hash}"
+        session = mgr.get_or_create("telegram:7654321")
+        assert session.user_peer_id == f"telegram_7654321-{expected_hash}"
 
     def test_prefixed_runtime_id_hashes_when_it_collides_with_alias_target(self):
         """Unknown generated peers should not silently merge into alias targets."""
-        raw_peer_id = "telegram_86701400"
+        raw_peer_id = "telegram_7654321"
         expected_hash = hashlib.sha256(raw_peer_id.encode("utf-8")).hexdigest()[:8]
         mgr = HonchoSessionManager(
             honcho=MagicMock(),
             config=self._config(
                 peer_name=None,
                 pin_peer_name=False,
-                user_peer_aliases={"known-user": "telegram_86701400"},
+                user_peer_aliases={"known-user": "telegram_7654321"},
                 runtime_peer_prefix="telegram_",
             ),
-            runtime_user_peer_name="86701400",
+            runtime_user_peer_name="7654321",
         )
         _patch_manager_for_resolution_test(mgr)
 
-        session = mgr.get_or_create("telegram:86701400")
-        assert session.user_peer_id == f"telegram_86701400-{expected_hash}"
+        session = mgr.get_or_create("telegram:7654321")
+        assert session.user_peer_id == f"telegram_7654321-{expected_hash}"
 
     def test_prefixed_runtime_id_extends_hash_when_short_hash_collides(self):
-        raw_peer_id = "telegram_86701400"
+        raw_peer_id = "telegram_7654321"
         digest = hashlib.sha256(raw_peer_id.encode("utf-8")).hexdigest()
         mgr = HonchoSessionManager(
             honcho=MagicMock(),
@@ -335,17 +349,17 @@ class TestPeerResolutionOrder:
                 peer_name=None,
                 pin_peer_name=False,
                 user_peer_aliases={
-                    "known-user": "telegram_86701400",
-                    "reserved-user": f"telegram_86701400-{digest[:8]}",
+                    "known-user": "telegram_7654321",
+                    "reserved-user": f"telegram_7654321-{digest[:8]}",
                 },
                 runtime_peer_prefix="telegram_",
             ),
-            runtime_user_peer_name="86701400",
+            runtime_user_peer_name="7654321",
         )
         _patch_manager_for_resolution_test(mgr)
 
-        session = mgr.get_or_create("telegram:86701400")
-        assert session.user_peer_id == f"telegram_86701400-{digest[:12]}"
+        session = mgr.get_or_create("telegram:7654321")
+        assert session.user_peer_id == f"telegram_7654321-{digest[:12]}"
 
     def test_alias_value_is_sanitized_after_selection(self):
         mgr = HonchoSessionManager(
@@ -353,13 +367,13 @@ class TestPeerResolutionOrder:
             config=self._config(
                 peer_name=None,
                 pin_peer_name=False,
-                user_peer_aliases={"86701400": "Alice Smith!"},
+                user_peer_aliases={"7654321": "Alice Smith!"},
             ),
-            runtime_user_peer_name="86701400",
+            runtime_user_peer_name="7654321",
         )
         _patch_manager_for_resolution_test(mgr)
 
-        session = mgr.get_or_create("telegram:86701400")
+        session = mgr.get_or_create("telegram:7654321")
         assert session.user_peer_id == "Alice-Smith-"
 
     def test_alias_keys_match_raw_runtime_id_before_sanitization(self):
@@ -391,13 +405,13 @@ class TestPeerResolutionOrder:
                 runtime_peer_prefix="telegram_",
                 session_peer_prefix=True,
             ),
-            runtime_user_peer_name="86701400",
+            runtime_user_peer_name="7654321",
         )
         _patch_manager_for_resolution_test(mgr)
 
-        session = mgr.get_or_create("telegram:86701400")
-        assert session.user_peer_id == "telegram_86701400"
-        assert session.honcho_session_id == "telegram-86701400"
+        session = mgr.get_or_create("telegram:7654321")
+        assert session.user_peer_id == "telegram_7654321"
+        assert session.honcho_session_id == "telegram-7654321"
 
     def test_config_wins_when_pin_is_true(self):
         """With pin enabled, configured peer_name beats runtime ID."""
@@ -406,14 +420,14 @@ class TestPeerResolutionOrder:
             config=self._config(
                 peer_name="Igor",
                 pin_peer_name=True,
-                user_peer_aliases={"86701400": "Alias"},
+                user_peer_aliases={"7654321": "Alias"},
                 runtime_peer_prefix="telegram_",
             ),
-            runtime_user_peer_name="86701400",  # Telegram pushes this in
+            runtime_user_peer_name="7654321",  # Telegram pushes this in
         )
         _patch_manager_for_resolution_test(mgr)
 
-        session = mgr.get_or_create("telegram:86701400")
+        session = mgr.get_or_create("telegram:7654321")
         assert session.user_peer_id == "Igor", (
             "With pinPeerName=true the user's configured peer_name must "
             "beat the platform-native runtime ID so memory stays unified "
@@ -429,26 +443,26 @@ class TestPeerResolutionOrder:
             config=self._config(
                 peer_name=None,
                 pin_peer_name=True,
-                user_peer_aliases={"86701400": "Igor"},
+                user_peer_aliases={"7654321": "Igor"},
                 runtime_peer_prefix="telegram_",
             ),
-            runtime_user_peer_name="86701400",
+            runtime_user_peer_name="7654321",
         )
         _patch_manager_for_resolution_test(mgr)
 
-        session = mgr.get_or_create("telegram:86701400")
+        session = mgr.get_or_create("telegram:7654321")
         assert session.user_peer_id == "Igor"
 
     def test_pin_noop_without_peer_name_or_mapping_preserves_runtime(self):
         mgr = HonchoSessionManager(
             honcho=MagicMock(),
             config=self._config(peer_name=None, pin_peer_name=True),
-            runtime_user_peer_name="86701400",
+            runtime_user_peer_name="7654321",
         )
         _patch_manager_for_resolution_test(mgr)
 
-        session = mgr.get_or_create("telegram:86701400")
-        assert session.user_peer_id == "86701400"
+        session = mgr.get_or_create("telegram:7654321")
+        assert session.user_peer_id == "7654321"
 
     def test_alt_runtime_id_can_match_alias_without_changing_raw_fallback(self):
         """Stable alternate IDs can map known users while primary ID fallback stays unchanged."""
@@ -526,11 +540,11 @@ class TestPeerResolutionOrder:
         mgr = HonchoSessionManager(
             honcho=MagicMock(),
             config=cfg,
-            runtime_user_peer_name="86701400",
+            runtime_user_peer_name="7654321",
         )
         _patch_manager_for_resolution_test(mgr)
 
-        session = mgr.get_or_create("telegram:86701400")
+        session = mgr.get_or_create("telegram:7654321")
         assert session.user_peer_id == "Igor"
         assert session.assistant_peer_id == "hermes-assistant"
 
@@ -556,10 +570,10 @@ class TestCrossPlatformMemoryUnification:
         mgr_telegram = HonchoSessionManager(
             honcho=MagicMock(),
             config=self._config_pinned(),
-            runtime_user_peer_name="86701400",
+            runtime_user_peer_name="7654321",
         )
         _patch_manager_for_resolution_test(mgr_telegram)
-        telegram_session = mgr_telegram.get_or_create("telegram:86701400")
+        telegram_session = mgr_telegram.get_or_create("telegram:7654321")
 
         # Discord turn (separate manager instance — simulates a fresh
         # platform-adapter invocation)
@@ -617,39 +631,39 @@ class TestPinUserPeerAlias:
 
     def test_root_pinUserPeer_true_pins(self, tmp_path):
         from plugins.memory.honcho.client import HonchoClientConfig
-        import json
+        import orjson
         config_file = tmp_path / "honcho.json"
-        config_file.write_text(json.dumps({
+        config_file.write_text(orjson.dumps({
             "apiKey": "***",
             "peerName": "eri",
             "pinUserPeer": True,
-        }))
+        }).decode('utf-8'))
         config = HonchoClientConfig.from_global_config(config_path=config_file)
         assert config.pin_peer_name is True
 
     def test_host_pinUserPeer_wins_over_root_pinPeerName(self, tmp_path):
         from plugins.memory.honcho.client import HonchoClientConfig
-        import json
+        import orjson
         config_file = tmp_path / "honcho.json"
-        config_file.write_text(json.dumps({
+        config_file.write_text(orjson.dumps({
             "apiKey": "***",
             "peerName": "eri",
             "pinPeerName": False,
             "hosts": {"hermes": {"pinUserPeer": True}},
-        }))
+        }).decode('utf-8'))
         config = HonchoClientConfig.from_global_config(config_path=config_file)
         assert config.pin_peer_name is True
 
     def test_host_pinUserPeer_false_disables_root_pinPeerName(self, tmp_path):
         from plugins.memory.honcho.client import HonchoClientConfig
-        import json
+        import orjson
         config_file = tmp_path / "honcho.json"
-        config_file.write_text(json.dumps({
+        config_file.write_text(orjson.dumps({
             "apiKey": "***",
             "peerName": "eri",
             "pinPeerName": True,
             "hosts": {"hermes": {"pinUserPeer": False}},
-        }))
+        }).decode('utf-8'))
         config = HonchoClientConfig.from_global_config(config_path=config_file)
         assert config.pin_peer_name is False, (
             "Host-level pinUserPeer=false must override root-level "
@@ -658,13 +672,13 @@ class TestPinUserPeerAlias:
 
     def test_pinPeerName_still_works_unchanged(self, tmp_path):
         from plugins.memory.honcho.client import HonchoClientConfig
-        import json
+        import orjson
         config_file = tmp_path / "honcho.json"
-        config_file.write_text(json.dumps({
+        config_file.write_text(orjson.dumps({
             "apiKey": "***",
             "peerName": "eri",
             "hosts": {"hermes": {"pinPeerName": True}},
-        }))
+        }).decode('utf-8'))
         config = HonchoClientConfig.from_global_config(config_path=config_file)
         assert config.pin_peer_name is True
 
@@ -701,20 +715,20 @@ class TestPinTransition:
         pinned_mgr = HonchoSessionManager(
             honcho=MagicMock(),
             config=self._pinned(),
-            runtime_user_peer_name="86701400",
+            runtime_user_peer_name="7654321",
         )
         _patch_manager_for_resolution_test(pinned_mgr)
-        before = pinned_mgr.get_or_create("telegram:86701400")
+        before = pinned_mgr.get_or_create("telegram:7654321")
         assert before.user_peer_id == "Igor"
 
         unpinned_mgr = HonchoSessionManager(
             honcho=MagicMock(),
             config=self._unpinned(),
-            runtime_user_peer_name="86701400",
+            runtime_user_peer_name="7654321",
         )
         _patch_manager_for_resolution_test(unpinned_mgr)
-        after = unpinned_mgr.get_or_create("telegram:86701400")
-        assert after.user_peer_id == "86701400", (
+        after = unpinned_mgr.get_or_create("telegram:7654321")
+        assert after.user_peer_id == "7654321", (
             "After flipping pinPeerName off, the same runtime ID must resolve "
             "to its own peer — otherwise multi-user mode silently merges users."
         )
@@ -723,14 +737,14 @@ class TestPinTransition:
         mgr = HonchoSessionManager(
             honcho=MagicMock(),
             config=self._pinned(),
-            runtime_user_peer_name="86701400",
+            runtime_user_peer_name="7654321",
         )
         _patch_manager_for_resolution_test(mgr)
-        first = mgr.get_or_create("telegram:86701400")
+        first = mgr.get_or_create("telegram:7654321")
         assert first.user_peer_id == "Igor"
 
         mgr._config = self._unpinned()
-        second = mgr.get_or_create("telegram:86701400")
+        second = mgr.get_or_create("telegram:7654321")
         assert second.user_peer_id == "Igor", (
             "The per-key session cache is keyed by session-key, not by "
             "resolved peer.  In-process flips don't invalidate it — the "
@@ -744,10 +758,11 @@ class TestPinTransition:
         cfg_path = tmp_path / "honcho.json"
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
-        cfg_path.write_text(json.dumps({"apiKey": "k", "peerName": "Igor", "pinPeerName": True}))
+        cfg_path.write_text(orjson.dumps({"apiKey": "k", "peerName": "Igor", "pinPeerName": True}).decode('utf-8'))
         sig_pinned = GatewayRunner._extract_cache_busting_config({"memory": {"provider": "honcho"}})
 
-        cfg_path.write_text(json.dumps({"apiKey": "k", "peerName": "Igor", "pinPeerName": False}))
+        cfg_path.write_text(orjson.dumps({"apiKey": "k", "peerName": "Igor", "pinPeerName": False}).decode('utf-8'))
+        _bump_mtime(cfg_path)
         sig_unpinned = GatewayRunner._extract_cache_busting_config({"memory": {"provider": "honcho"}})
 
         assert sig_pinned["honcho.pin_peer_name"] != sig_unpinned["honcho.pin_peer_name"]
@@ -758,14 +773,15 @@ class TestPinTransition:
         cfg_path = tmp_path / "honcho.json"
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
-        cfg_path.write_text(json.dumps({"apiKey": "k", "peerName": "Igor"}))
+        cfg_path.write_text(orjson.dumps({"apiKey": "k", "peerName": "Igor"}).decode('utf-8'))
         sig_no_aliases = GatewayRunner._extract_cache_busting_config({"memory": {"provider": "honcho"}})
 
-        cfg_path.write_text(json.dumps({
+        cfg_path.write_text(orjson.dumps({
             "apiKey": "k",
             "peerName": "Igor",
-            "userPeerAliases": {"86701400": "Igor"},
-        }))
+            "userPeerAliases": {"7654321": "Igor"},
+        }).decode('utf-8'))
+        _bump_mtime(cfg_path)
         sig_with_aliases = GatewayRunner._extract_cache_busting_config({"memory": {"provider": "honcho"}})
 
         assert sig_no_aliases["honcho.user_peer_aliases"] != sig_with_aliases["honcho.user_peer_aliases"]
@@ -776,14 +792,15 @@ class TestPinTransition:
         cfg_path = tmp_path / "honcho.json"
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
-        cfg_path.write_text(json.dumps({"apiKey": "k", "peerName": "Igor"}))
+        cfg_path.write_text(orjson.dumps({"apiKey": "k", "peerName": "Igor"}).decode('utf-8'))
         sig_no_prefix = GatewayRunner._extract_cache_busting_config({"memory": {"provider": "honcho"}})
 
-        cfg_path.write_text(json.dumps({
+        cfg_path.write_text(orjson.dumps({
             "apiKey": "k",
             "peerName": "Igor",
             "runtimePeerPrefix": "telegram_",
-        }))
+        }).decode('utf-8'))
+        _bump_mtime(cfg_path)
         sig_with_prefix = GatewayRunner._extract_cache_busting_config({"memory": {"provider": "honcho"}})
 
         assert sig_no_prefix["honcho.runtime_peer_prefix"] != sig_with_prefix["honcho.runtime_peer_prefix"]
@@ -800,18 +817,19 @@ class TestPinTransition:
         cfg_path = tmp_path / "honcho.json"
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
-        cfg_path.write_text(json.dumps({
+        cfg_path.write_text(orjson.dumps({
             "apiKey": "k",
             "peerName": "Igor",
             "aiPeer": "hermes",
-        }))
+        }).decode('utf-8'))
         sig_before = GatewayRunner._extract_cache_busting_config({"memory": {"provider": "honcho"}})
 
-        cfg_path.write_text(json.dumps({
+        cfg_path.write_text(orjson.dumps({
             "apiKey": "k",
             "peerName": "Igor",
             "aiPeer": "hermetika",
-        }))
+        }).decode('utf-8'))
+        _bump_mtime(cfg_path)
         sig_after = GatewayRunner._extract_cache_busting_config({"memory": {"provider": "honcho"}})
 
         assert sig_before["honcho.ai_peer"] != sig_after["honcho.ai_peer"]
@@ -839,18 +857,18 @@ class TestProfilePeerUniqueness:
         mgr_a = HonchoSessionManager(
             honcho=MagicMock(),
             config=self._pinned_to("alice"),
-            runtime_user_peer_name="86701400",
+            runtime_user_peer_name="7654321",
         )
         _patch_manager_for_resolution_test(mgr_a)
-        sess_a = mgr_a.get_or_create("telegram:86701400")
+        sess_a = mgr_a.get_or_create("telegram:7654321")
 
         mgr_b = HonchoSessionManager(
             honcho=MagicMock(),
             config=self._pinned_to("bob"),
-            runtime_user_peer_name="86701400",
+            runtime_user_peer_name="7654321",
         )
         _patch_manager_for_resolution_test(mgr_b)
-        sess_b = mgr_b.get_or_create("telegram:86701400")
+        sess_b = mgr_b.get_or_create("telegram:7654321")
 
         assert sess_a.user_peer_id == "alice"
         assert sess_b.user_peer_id == "bob"
@@ -864,7 +882,7 @@ class TestProfilePeerUniqueness:
         sharing a single root-level apiKey and workspace.
         """
         config_file = tmp_path / "honcho.json"
-        config_file.write_text(json.dumps({
+        config_file.write_text(orjson.dumps({
             "apiKey": "k",
             "peerName": "default-user",
             "hosts": {
@@ -873,7 +891,7 @@ class TestProfilePeerUniqueness:
                     "pinPeerName": True,
                 },
             },
-        }))
+        }).decode('utf-8'))
         monkeypatch.setenv("HERMES_HOME", str(tmp_path / "isolated"))
 
         cfg = HonchoClientConfig.from_global_config(

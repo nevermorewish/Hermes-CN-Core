@@ -17,6 +17,23 @@ Events:
   - command:*           -- Any slash command executed (wildcard match)
 
 Errors in hooks are caught and logged but never block the main pipeline.
+
+Context dict passed to ``agent:start`` / ``agent:end`` handlers:
+  platform     -- source platform name (e.g. "telegram", "matrix", "slack")
+  user_id      -- platform user id of the sender
+  chat_id      -- platform chat id (group/DM identifier)
+  thread_id    -- Telegram forum-topic id / thread root id (string; empty
+                  when not in a thread / topic)
+  chat_type    -- "dm" | "group" | "forum" (empty if unknown)
+  session_id   -- Hermes session id
+  message      -- inbound message text (truncated to 500 chars)
+
+``agent:end`` adds:
+  response     -- agent response text (truncated to 500 chars)
+
+Handlers posting a follow-up into the same Telegram forum-topic should
+include ``message_thread_id=int(thread_id)`` when ``chat_type == "forum"``
+and ``thread_id`` is non-empty.
 """
 
 import asyncio
@@ -87,7 +104,7 @@ class HookRegistry:
                 continue
 
             try:
-                manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+                manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8", errors="replace"))
                 if not manifest or not isinstance(manifest, dict):
                     print(f"[hooks] Skipping {hook_dir.name}: invalid HOOK.yaml", flush=True)
                     continue

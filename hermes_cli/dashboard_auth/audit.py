@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import enum
-import json
+import orjson
 import logging
 import os
 import threading
@@ -47,6 +47,8 @@ class AuditEvent(enum.Enum):
     SESSION_VERIFY_FAILURE = "session_verify_failure"
     WS_TICKET_MINTED = "ws_ticket_minted"
     WS_TICKET_REJECTED = "ws_ticket_rejected"
+    TOKEN_AUTH_SUCCESS = "token_auth_success"
+    TOKEN_AUTH_FAILURE = "token_auth_failure"
 
 
 def _resolve_log_path() -> Path:
@@ -76,12 +78,12 @@ def audit_log(event: AuditEvent, **fields: Any) -> None:
         "event": event.value,
         **safe_fields,
     }
-    line = json.dumps(entry, separators=(",", ":")) + "\n"
+    line = orjson.dumps(entry).decode('utf-8') + "\n"
     path = _resolve_log_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with _write_lock:
-            with open(path, "a", encoding="utf-8") as f:
+            with open(path, "a", encoding="utf-8", errors="replace") as f:
                 f.write(line)
     except Exception as e:
         _log.warning("dashboard-auth audit log write failed: %s", e)

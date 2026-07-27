@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import argparse
 import csv
-import re
+from agent.re_compat import re
 import sys
 import urllib.parse
 from pathlib import Path
@@ -232,7 +232,7 @@ def fetch(query: str, limit: int, no_wikidata: bool, out_path: str) -> int:
         )
 
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
-    with open(out_path, "w", newline="", encoding="utf-8") as fh:
+    with open(out_path, "w", newline="", encoding="utf-8", errors="replace") as fh:
         w = csv.DictWriter(fh, fieldnames=COLUMNS)
         w.writeheader()
         w.writerows(rows)

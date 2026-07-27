@@ -92,7 +92,7 @@ class TestSaveConfigValueAtomic:
         from cli import save_config_value
         save_config_value("display.skin", "mono")
 
-        text = config_env.read_text(encoding="utf-8")
+        text = config_env.read_text(encoding="utf-8", errors="replace")
         result = yaml.safe_load(text)
         assert result["display"]["skin"] == "mono"
         assert "# user selected model" in text
@@ -112,7 +112,7 @@ class TestSaveConfigValueAtomic:
         from cli import save_config_value
         save_config_value("display.skin", "mono")
 
-        text = config_env.read_text(encoding="utf-8")
+        text = config_env.read_text(encoding="utf-8", errors="replace")
         result = yaml.safe_load(text)
         assert result["agent"]["system_prompt"] == "你好，保持中文输出"
         assert "你好，保持中文输出" in text
@@ -132,3 +132,31 @@ class TestSaveConfigValueAtomic:
 
         assert result is False
         assert config_env.read_text() == original_content
+
+
+def test_save_config_value_never_writes_into_source_tree(tmp_path, monkeypatch):
+    """[CN-fork] P-027: save_config_value must not create <repo>/cli-config.yaml.
+
+    When the (hermetic) HERMES_HOME has no config.yaml, the write must target the
+    user config — not fall back to creating the project-level cli-config.yaml in
+    the installed package / source tree (which leaks across parallel test workers
+    and pollutes load_cli_config's project fallback under HERMES_IGNORE_USER_CONFIG).
+    """
+    from pathlib import Path
+
+    import cli
+    from cli import save_config_value
+
+    hermes_home = tmp_path / ".hermes"  # intentionally has no config.yaml
+    monkeypatch.setattr("cli._hermes_home", hermes_home)
+
+    project_config = Path(cli.__file__).parent / "cli-config.yaml"
+    project_pre_existed = project_config.exists()
+
+    save_config_value("model.default", "test/p025-model")
+
+    if not project_pre_existed:
+        assert not project_config.exists(), (
+            "save_config_value must not create <repo>/cli-config.yaml"
+        )
+    assert (hermes_home / "config.yaml").exists(), "user config should be created"

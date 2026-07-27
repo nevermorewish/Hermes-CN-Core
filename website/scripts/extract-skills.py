@@ -260,7 +260,7 @@ def extract_local_skills():
                 continue
 
             skill_path = os.path.join(root, "SKILL.md")
-            with open(skill_path, encoding="utf-8") as f:
+            with open(skill_path, encoding="utf-8", errors="replace") as f:
                 content = f.read()
 
             if not content.startswith("---"):
@@ -353,8 +353,8 @@ def extract_unified_index_skills():
         return None, None
 
     try:
-        with open(UNIFIED_INDEX_PATH, encoding="utf-8") as f:
-            data = json.load(f)
+        with open(UNIFIED_INDEX_PATH, encoding="utf-8", errors="replace") as f:
+            data = json.loads(f.read())
     except (json.JSONDecodeError, OSError) as e:
         print(f"[extract-skills] Failed to read unified index: {e}")
         return None, None
@@ -454,8 +454,8 @@ def extract_legacy_cache_skills():
 
         filepath = os.path.join(LEGACY_INDEX_CACHE_DIR, filename)
         try:
-            with open(filepath, encoding="utf-8") as f:
-                data = json.load(f)
+            with open(filepath, encoding="utf-8", errors="replace") as f:
+                data = json.loads(f.read())
         except (json.JSONDecodeError, OSError):
             continue
 
@@ -649,7 +649,7 @@ def main():
     with open(OUTPUT, "w", encoding="utf-8") as f:
         # Minified — file is served over the wire, not read by humans.
         # At 50k+ skills the indented version was ~30% larger.
-        json.dump(all_skills, f, separators=(",", ":"), ensure_ascii=False)
+        f.write(json.dumps(all_skills, ensure_ascii=False))
 
     # Sidecar meta file so the page can render a "Last refreshed" badge
     # without changing the shape of skills.json.
@@ -665,7 +665,7 @@ def main():
     if index_meta:
         meta.update(index_meta)
     with open(META_OUTPUT, "w", encoding="utf-8") as f:
-        json.dump(meta, f, separators=(",", ":"), ensure_ascii=False)
+        f.write(json.dumps(meta, ensure_ascii=False))
 
     print(f"Extracted {len(all_skills)} skills to {OUTPUT}")
     print(f"  {len(local)} local ({sum(1 for s in local if s['source'] == 'built-in')} built-in, "

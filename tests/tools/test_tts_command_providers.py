@@ -12,7 +12,7 @@ the tests run identically on Linux, macOS, and (with minor quoting
 differences) Windows.
 """
 
-import json
+import orjson
 import os
 import sys
 from pathlib import Path
@@ -367,7 +367,7 @@ class TestGenerateCommandTts:
         assert out.exists()
         # The command copied the input text file over to output, so it
         # contains the original UTF-8 text.
-        assert out.read_text(encoding="utf-8") == "hello world"
+        assert out.read_text(encoding="utf-8", errors="replace") == "hello world"
 
     def test_empty_command_raises(self, tmp_path):
         with pytest.raises(ValueError, match="is not configured"):
@@ -444,7 +444,7 @@ class TestTextToSpeechToolWithCommandProvider:
 
         with patch("tools.tts_tool._load_tts_config", fake_load):
             result = text_to_speech_tool(text="hi", output_path=str(out))
-        data = json.loads(result)
+        data = orjson.loads(result)
         assert data["success"] is True, data
         assert data["provider"] == "py-copy"
         assert data["voice_compatible"] is False
@@ -468,7 +468,7 @@ class TestTextToSpeechToolWithCommandProvider:
 
         with patch("tools.tts_tool._load_tts_config", return_value=cfg):
             result = text_to_speech_tool(text="hi", output_path=str(out))
-        data = json.loads(result)
+        data = orjson.loads(result)
         assert data["success"] is True
         assert data["voice_compatible"] is True
         assert data["media_tag"].startswith("[[audio_as_voice]]")
@@ -485,7 +485,7 @@ class TestTextToSpeechToolWithCommandProvider:
         }
         with patch("tools.tts_tool._load_tts_config", return_value=cfg):
             result = text_to_speech_tool(text="hi", output_path=str(tmp_path / "x.mp3"))
-        data = json.loads(result)
+        data = orjson.loads(result)
         # The response should not carry the command-provider error text.
         err = (data.get("error") or "").lower()
         assert "tts.providers.broken.command is not configured" not in err
@@ -493,6 +493,9 @@ class TestTextToSpeechToolWithCommandProvider:
 
 class TestCheckTtsRequirements:
     def test_configured_command_provider_satisfies_requirement(self):
-        cfg = {"providers": {"x": {"type": "command", "command": "echo x"}}}
+        cfg = {
+            "provider": "x",
+            "providers": {"x": {"type": "command", "command": "echo x"}},
+        }
         with patch("tools.tts_tool._load_tts_config", return_value=cfg):
             assert check_tts_requirements() is True

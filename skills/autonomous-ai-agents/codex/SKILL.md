@@ -1,7 +1,7 @@
 ---
 name: codex
 description: "Delegate coding to OpenAI Codex CLI (features, PRs)."
-version: 1.0.0
+version: 1.1.0
 author: Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -52,8 +52,11 @@ terminal(command="cd $(mktemp -d) && git init && codex exec 'Build a snake game 
 ## Background Mode (Long Tasks)
 
 ```
-# Start in background with PTY
-terminal(command="codex exec --full-auto 'Refactor the auth module'", workdir="~/project", background=true, pty=true)
+# Start in background with PTY. --json emits machine-readable JSONL events
+# (recent Codex CLI versions) that Hermes' desktop UI renders as a live
+# delegation timeline; if your codex rejects the flag (check
+# `codex exec --help`), drop it — behaviour is otherwise identical.
+terminal(command="codex exec --json --full-auto 'Refactor the auth module'", workdir="~/project", background=true, pty=true, notify_on_complete=true)
 # Returns session_id
 
 # Monitor progress
@@ -74,6 +77,25 @@ process(action="kill", session_id="<id>")
 | `exec "prompt"` | One-shot execution, exits when done |
 | `--full-auto` | Sandboxed but auto-approves file changes in workspace |
 | `--yolo` | No sandbox, no approvals (fastest, most dangerous) |
+| `--sandbox danger-full-access` | No Codex sandbox; useful when the host service context breaks bubblewrap |
+
+## Hermes Gateway Caveat
+
+When invoking the Codex CLI from a Hermes gateway/service context (for example,
+Telegram-driven agent sessions), Codex `workspace-write` sandboxing may fail even
+when the same command works in the user's interactive shell. A typical symptom is
+bubblewrap/user-namespace errors such as `setting up uid map: Permission denied`
+or `loopback: Failed RTM_NEWADDR: Operation not permitted`.
+
+In that context, prefer:
+
+```
+codex exec --sandbox danger-full-access "<task>"
+```
+
+Use process boundaries as the safety layer instead: explicit `workdir`, clean git
+status before launch, narrow task prompts, `git diff` review, targeted tests, and
+human/agent confirmation before committing broad changes.
 
 ## PR Reviews
 
@@ -125,6 +147,6 @@ terminal(command="gh pr comment 86 --body '<review>'", workdir="~/project")
 2. **Git repo required** — Codex won't run outside a git directory. Use `mktemp -d && git init` for scratch
 3. **Use `exec` for one-shots** — `codex exec "prompt"` runs and exits cleanly
 4. **`--full-auto` for building** — auto-approves changes within the sandbox
-5. **Background for long tasks** — use `background=true` and monitor with `process` tool
+5. **Background for long tasks** — use `background=true, notify_on_complete=true` and monitor with `process` tool; add `--json` when supported so progress is machine-readable
 6. **Don't interfere** — monitor with `poll`/`log`, be patient with long-running tasks
 7. **Parallel is fine** — run multiple Codex processes at once for batch work

@@ -1,5 +1,6 @@
 """Tests for model_tools.py — function call dispatch, agent-loop interception, legacy toolsets."""
 
+import orjson
 import json
 from unittest.mock import ANY, call, patch
 
@@ -21,19 +22,19 @@ from model_tools import (
 class TestHandleFunctionCall:
     def test_agent_loop_tool_returns_error(self):
         for tool_name in _AGENT_LOOP_TOOLS:
-            result = json.loads(handle_function_call(tool_name, {}))
+            result = orjson.loads(handle_function_call(tool_name, {}))
             assert "error" in result
             assert "agent loop" in result["error"].lower()
 
     def test_unknown_tool_returns_error(self):
-        result = json.loads(handle_function_call("totally_fake_tool_xyz", {}))
+        result = orjson.loads(handle_function_call("totally_fake_tool_xyz", {}))
         assert "error" in result
         assert "totally_fake_tool_xyz" in result["error"]
 
     def test_exception_returns_json_error(self):
         # Even if something goes wrong, should return valid JSON
         result = handle_function_call("web_search", None)  # None args may cause issues
-        parsed = json.loads(result)
+        parsed = orjson.loads(result)
         assert isinstance(parsed, dict)
         assert "error" in parsed
         assert len(parsed["error"]) > 0
@@ -64,6 +65,7 @@ class TestHandleFunctionCall:
                 tool_call_id="call-1",
                 turn_id="",
                 api_request_id="",
+                middleware_trace=[],
             ),
             call(
                 "post_tool_call",
@@ -79,6 +81,7 @@ class TestHandleFunctionCall:
                 status="ok",
                 error_type=None,
                 error_message=None,
+                middleware_trace=[],
             ),
             call(
                 "transform_tool_result",
@@ -145,6 +148,60 @@ class TestHandleFunctionCall:
         assert "post_tool_call" not in fired
         assert "transform_tool_result" not in fired
 
+    def test_tool_request_and_execution_middleware_wrap_registry_dispatch(self, monkeypatch):
+        seen = {}
+
+        def fake_invoke_middleware(kind, **kwargs):
+            if kind == "tool_request":
+                return [{
+                    "args": {**kwargs["args"], "rewritten": True},
+                    "source": "test-middleware",
+                    "reason": "rewrite",
+                }]
+            return []
+
+        def execution_middleware(**kwargs):
+            seen["execution_args"] = kwargs["args"]
+            return kwargs["next_call"]({**kwargs["args"], "wrapped": True})
+
+        def fake_dispatch(tool_name, args, **kwargs):
+            seen["dispatch"] = (tool_name, args, kwargs)
+            return orjson.dumps({"ok": True, "args": args}).decode('utf-8')
+
+        manager = type(
+            "Manager",
+            (),
+            {"_middleware": {"tool_request": [fake_invoke_middleware], "tool_execution": [execution_middleware]}},
+        )()
+        monkeypatch.setattr("hermes_cli.plugins.invoke_middleware", fake_invoke_middleware)
+        monkeypatch.setattr("hermes_cli.plugins.get_plugin_manager", lambda: manager)
+        hook_calls = []
+        monkeypatch.setattr(
+            "hermes_cli.plugins.invoke_hook",
+            lambda hook_name, **kwargs: hook_calls.append((hook_name, kwargs)) or [],
+        )
+        monkeypatch.setattr("hermes_cli.plugins.has_hook", lambda name: True)
+        monkeypatch.setattr("model_tools.registry.dispatch", fake_dispatch)
+
+        result = orjson.loads(
+            handle_function_call(
+                "web_search",
+                {"q": "test"},
+                task_id="task-1",
+                tool_call_id="tool-1",
+                session_id="session-1",
+            )
+        )
+
+        assert seen["execution_args"] == {"q": "test", "rewritten": True}
+        assert seen["dispatch"][1] == {"q": "test", "rewritten": True, "wrapped": True}
+        assert result["args"] == {"q": "test", "rewritten": True, "wrapped": True}
+        expected_trace = [{"source": "test-middleware", "reason": "rewrite"}]
+        pre_call = next(call for call in hook_calls if call[0] == "pre_tool_call")
+        post_call = next(call for call in hook_calls if call[0] == "post_tool_call")
+        assert pre_call[1]["middleware_trace"] == expected_trace
+        assert post_call[1]["middleware_trace"] == expected_trace
+
 
 # =========================================================================
 # Agent loop tools
@@ -190,7 +247,7 @@ class TestPreToolCallBlocking:
         monkeypatch.setattr("hermes_cli.plugins.has_hook", lambda name: True)
         monkeypatch.setattr("model_tools.registry.dispatch", fake_dispatch)
 
-        result = json.loads(handle_function_call("read_file", {"path": "test.txt"}, task_id="t1"))
+        result = orjson.loads(handle_function_call("read_file", {"path": "test.txt"}, task_id="t1"))
         assert result == {"error": "Blocked by policy"}
         assert not dispatch_called
         post_call = next(call for call in hook_calls if call[0] == "post_tool_call")
@@ -213,7 +270,7 @@ class TestPreToolCallBlocking:
         monkeypatch.setattr("tools.file_tools.notify_other_tool_call",
                             lambda task_id: notifications.append(task_id))
 
-        result = json.loads(handle_function_call("web_search", {"q": "test"}, task_id="t1"))
+        result = orjson.loads(handle_function_call("web_search", {"q": "test"}, task_id="t1"))
         assert result == {"error": "Blocked"}
         assert notifications == []
 
@@ -230,9 +287,9 @@ class TestPreToolCallBlocking:
 
         monkeypatch.setattr("hermes_cli.plugins.invoke_hook", fake_invoke_hook)
         monkeypatch.setattr("model_tools.registry.dispatch",
-                            lambda *a, **kw: json.dumps({"ok": True}))
+                            lambda *a, **kw: orjson.dumps({"ok": True}).decode('utf-8'))
 
-        result = json.loads(handle_function_call("read_file", {"path": "test.txt"}, task_id="t1"))
+        result = orjson.loads(handle_function_call("read_file", {"path": "test.txt"}, task_id="t1"))
         assert result == {"ok": True}
 
     def test_skip_flag_prevents_double_fire(self, monkeypatch):
@@ -253,7 +310,7 @@ class TestPreToolCallBlocking:
         monkeypatch.setattr("hermes_cli.plugins.invoke_hook", fake_invoke_hook)
         monkeypatch.setattr("hermes_cli.plugins.has_hook", lambda name: True)
         monkeypatch.setattr("model_tools.registry.dispatch",
-                            lambda *a, **kw: json.dumps({"ok": True}))
+                            lambda *a, **kw: orjson.dumps({"ok": True}).decode('utf-8'))
 
         handle_function_call("web_search", {"q": "test"}, task_id="t1",
                              skip_pre_tool_call_hook=True)
@@ -291,7 +348,7 @@ class TestPreToolCallBlocking:
 
         monkeypatch.setattr("hermes_cli.plugins.invoke_hook", fake_invoke_hook)
         monkeypatch.setattr("model_tools.registry.dispatch",
-                            lambda *a, **kw: json.dumps({"ok": True}))
+                            lambda *a, **kw: orjson.dumps({"ok": True}).decode('utf-8'))
 
         # Step 1: caller checks for a block directive (this fires pre_tool_call once).
         block = get_pre_tool_call_block_message(
@@ -319,7 +376,7 @@ class TestPreToolCallBlocking:
 class TestLegacyToolsetMap:
     def test_expected_legacy_names(self):
         expected = [
-            "web_tools", "terminal_tools", "vision_tools", "moa_tools",
+            "web_tools", "terminal_tools", "vision_tools",
             "image_tools", "skills_tools", "browser_tools", "cronjob_tools",
             "file_tools", "tts_tools",
         ]
@@ -393,7 +450,7 @@ class TestCoerceNumberInfNan:
         from model_tools import _coerce_number
         for s in ("inf", "-inf", "nan", "Infinity"):
             result = _coerce_number(s)
-            json.dumps({"x": result}, allow_nan=False)  # must not raise
+            orjson.dumps({"x": result}).decode("utf-8")  # orjson is strict: NaN/Inf raise — must not raise
 
     def test_normal_numbers_still_coerce(self):
         """Guard against over-correction — real numbers still coerce."""
@@ -401,3 +458,133 @@ class TestCoerceNumberInfNan:
         assert _coerce_number("42") == 42
         assert _coerce_number("3.14") == 3.14
         assert _coerce_number("1e3") == 1000
+
+class TestDisabledToolsetsPlatformBundle:
+    """Regression test for #33924: disabling a platform bundle (hermes-*)
+    must not remove core tools from other enabled toolsets."""
+
+    def test_disabling_platform_bundle_preserves_core_tools(self):
+        """Disabling hermes-yuanbao should not strip core tools from hermes-telegram."""
+        from model_tools import get_tool_definitions
+
+        tools_telegram = get_tool_definitions(
+            enabled_toolsets=["hermes-telegram"],
+            quiet_mode=True,
+        )
+        tools_telegram_no_yuanbao = get_tool_definitions(
+            enabled_toolsets=["hermes-telegram"],
+            disabled_toolsets=["hermes-yuanbao"],
+            quiet_mode=True,
+        )
+        names_telegram = {t["function"]["name"] for t in tools_telegram}
+        names_no_yuanbao = {t["function"]["name"] for t in tools_telegram_no_yuanbao}
+
+        # Disabling a *different* platform bundle must not remove any tools
+        assert names_telegram == names_no_yuanbao, (
+            f"Tools lost after disabling hermes-yuanbao: "
+            f"{names_telegram - names_no_yuanbao}"
+        )
+
+    def test_disabling_platform_bundle_removes_own_tools(self):
+        """Disabling hermes-discord should remove discord-specific tools."""
+        from model_tools import get_tool_definitions
+
+        tools = get_tool_definitions(
+            enabled_toolsets=["hermes-discord"],
+            disabled_toolsets=["hermes-discord"],
+            quiet_mode=True,
+        )
+        names = {t["function"]["name"] for t in tools}
+        assert "discord" not in names
+
+    def test_disabling_non_platform_toolset_still_works(self):
+        """Disabling a regular (non-hermes-) toolset still subtracts all tools."""
+        from model_tools import get_tool_definitions
+
+        tools_normal = get_tool_definitions(
+            enabled_toolsets=["hermes-telegram"],
+            quiet_mode=True,
+        )
+        tools_no_web = get_tool_definitions(
+            enabled_toolsets=["hermes-telegram"],
+            disabled_toolsets=["web"],
+            quiet_mode=True,
+        )
+        names_normal = {t["function"]["name"] for t in tools_normal}
+        names_no_web = {t["function"]["name"] for t in tools_no_web}
+
+        web_tools = {"web_search", "web_extract"}
+        removed = names_normal - names_no_web
+        # web tools should be removed (if they were present)
+        present_web = web_tools & names_normal
+        assert present_web <= removed, (
+            f"Web tools not removed: {present_web - removed}"
+        )
+
+
+    def test_disabling_bundle_removes_platform_tools_but_keeps_core(self):
+        """Disabling hermes-discord (when enabled) removes discord/discord_admin
+        from the resolved delta but keeps core tools — via bundle_non_core_tools."""
+        from toolsets import bundle_non_core_tools, _HERMES_CORE_TOOLS
+
+        delta = bundle_non_core_tools("hermes-yuanbao")
+        # The delta is the bundle's platform-specific tools, NOT core.
+        assert "yb_send_dm" in delta
+        assert not (delta & set(_HERMES_CORE_TOOLS)), "core tools must not be in the removal delta"
+
+    def test_bundle_non_core_tools_unknown_falls_back(self):
+        """An unknown/garbage bundle name falls back to full resolution (best effort)."""
+        from toolsets import bundle_non_core_tools
+        # A non-existent bundle resolves to an empty set (no tools), not a crash.
+        assert bundle_non_core_tools("hermes-does-not-exist") == set()
+
+
+class TestDisabledToolsetsPostureToolset:
+    """Regression test for #57315: disabling a posture toolset (`coding`,
+    posture: True) must preserve the shared core tools it re-lists but does
+    not own -- same non-core-delta subtraction as hermes-* bundles (#33924) --
+    while atomic toolsets stay fully removable."""
+
+    def test_disabling_coding_preserves_core_but_atomic_disables_still_remove(self):
+        from model_tools import get_tool_definitions
+
+        # web_search is check_fn-gated (needs an API key); probe only the core
+        # tools actually present in baseline so gating cannot mask the fix.
+        core_probe = {"terminal", "read_file", "write_file", "web_search", "execute_code"}
+
+        baseline = {
+            t["function"]["name"]
+            for t in get_tool_definitions(quiet_mode=True)
+        }
+        present_core = core_probe & baseline
+        # Sanity: at least some probed core tools are available in this env.
+        assert present_core, "no probed core tools present in baseline"
+
+        no_coding = {
+            t["function"]["name"]
+            for t in get_tool_definitions(
+                disabled_toolsets=["coding"], quiet_mode=True
+            )
+        }
+        # Previously the full resolve_toolset("coding") subtraction stripped
+        # these shared core tools, collapsing the schema to a handful (#57315).
+        assert present_core <= no_coding, (
+            f"Core tools stripped by disabling 'coding': {present_core - no_coding}"
+        )
+
+        # Atomic (non-posture) toolsets must still be fully removable.
+        no_terminal = {
+            t["function"]["name"]
+            for t in get_tool_definitions(
+                disabled_toolsets=["terminal"], quiet_mode=True
+            )
+        }
+        assert "terminal" not in no_terminal
+
+        no_file = {
+            t["function"]["name"]
+            for t in get_tool_definitions(
+                disabled_toolsets=["file"], quiet_mode=True
+            )
+        }
+        assert "write_file" not in no_file

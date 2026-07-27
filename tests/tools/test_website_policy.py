@@ -1,4 +1,4 @@
-import json
+import orjson
 from pathlib import Path
 
 import pytest
@@ -318,7 +318,7 @@ def test_browser_navigate_returns_policy_block(monkeypatch):
         lambda *args, **kwargs: pytest.fail("browser command should not run for blocked URL"),
     )
 
-    result = json.loads(browser_tool.browser_navigate("https://blocked.test"))
+    result = orjson.loads(browser_tool.browser_navigate("https://blocked.test"))
 
     assert result["success"] is False
     assert result["blocked_by_policy"]["rule"] == "blocked.test"
@@ -360,8 +360,12 @@ class TestWebToolPolicy:
     _register_providers = staticmethod(register_all_web_providers)
 
     @pytest.fixture(autouse=True)
-    def _populate_web_registry(self):
+    def _populate_web_registry(self, monkeypatch):
         self._register_providers()
+        from tools import web_tools
+
+        monkeypatch.setattr(web_tools, "_ensure_web_plugins_loaded", lambda: None)
+        monkeypatch.setattr(web_tools, "_load_web_config", lambda: {"backend": "firecrawl"})
         yield
         from agent.web_search_registry import _reset_for_tests
         _reset_for_tests()
@@ -398,7 +402,7 @@ class TestWebToolPolicy:
         # Force the firecrawl plugin to be the active extract provider.
         monkeypatch.setenv("FIRECRAWL_API_KEY", "fake-key")
 
-        result = json.loads(await web_tools.web_extract_tool(["https://blocked.test"], use_llm_processing=False))
+        result = orjson.loads(await web_tools.web_extract_tool(["https://blocked.test"]))
 
         assert result["results"][0]["url"] == "https://blocked.test"
         assert "Blocked by website policy" in result["results"][0]["error"]
@@ -413,6 +417,7 @@ class TestWebToolPolicy:
             return True
 
         monkeypatch.setattr(web_tools, "async_is_safe_url", _allow_ssrf)
+        monkeypatch.setattr(firecrawl_provider, "is_safe_url", lambda url: True)
 
         def fake_check(url):
             if url == "https://allowed.test":
@@ -443,11 +448,56 @@ class TestWebToolPolicy:
         monkeypatch.setattr("tools.interrupt.is_interrupted", lambda: False)
         monkeypatch.setenv("FIRECRAWL_API_KEY", "fake-key")
 
-        result = json.loads(await web_tools.web_extract_tool(["https://allowed.test"], use_llm_processing=False))
+        result = orjson.loads(await web_tools.web_extract_tool(["https://allowed.test"]))
 
         assert result["results"][0]["url"] == "https://blocked.test/final"
         assert result["results"][0]["content"] == ""
         assert result["results"][0]["blocked_by_policy"]["rule"] == "blocked.test"
+
+    @pytest.mark.asyncio
+    async def test_web_extract_blocks_firecrawl_unsafe_final_url(self, monkeypatch):
+        from tools import web_tools
+        from plugins.web.firecrawl import provider as firecrawl_provider
+
+        async def _allow_ssrf(_url: str) -> bool:
+            return True
+
+        monkeypatch.setattr(web_tools, "async_is_safe_url", _allow_ssrf)
+        monkeypatch.setattr(
+            firecrawl_provider,
+            "is_safe_url",
+            lambda url: url != "http://169.254.169.254/latest/meta-data/",
+        )
+
+        checked_urls = []
+
+        def fake_check(url):
+            checked_urls.append(url)
+            if url == "https://allowed.test":
+                return None
+            pytest.fail(f"unexpected website policy check for unsafe URL: {url}")
+
+        class FakeFirecrawlClient:
+            def scrape(self, url, formats):
+                return {
+                    "markdown": "metadata credentials",
+                    "metadata": {
+                        "title": "Metadata",
+                        "sourceURL": "http://169.254.169.254/latest/meta-data/",
+                    },
+                }
+
+        monkeypatch.setattr(firecrawl_provider, "check_website_access", fake_check)
+        monkeypatch.setattr(firecrawl_provider, "_get_firecrawl_client", lambda: FakeFirecrawlClient())
+        monkeypatch.setattr("tools.interrupt.is_interrupted", lambda: False)
+        monkeypatch.setenv("FIRECRAWL_API_KEY", "fake-key")
+
+        result = orjson.loads(await web_tools.web_extract_tool(["https://allowed.test"]))
+
+        assert checked_urls == ["https://allowed.test"]
+        assert result["results"][0]["url"] == "http://169.254.169.254/latest/meta-data/"
+        assert result["results"][0]["content"] == ""
+        assert "private or internal network" in result["results"][0]["error"]
 
 
 def test_check_website_access_fails_open_on_malformed_config(tmp_path, monkeypatch):

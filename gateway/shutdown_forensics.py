@@ -17,7 +17,7 @@ the async helper, never in the synchronous probe.
 
 from __future__ import annotations
 
-import json
+import orjson
 import os
 import signal
 import subprocess
@@ -48,7 +48,7 @@ def _signal_name(sig: Any) -> str:
 def _read_proc_field(pid: int, key: str) -> Optional[str]:
     """Read a single field from /proc/<pid>/status.  Linux only; None elsewhere."""
     try:
-        with open(f"/proc/{pid}/status", encoding="utf-8") as fh:
+        with open(f"/proc/{pid}/status", encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 if line.startswith(key + ":"):
                     return line.split(":", 1)[1].strip()
@@ -173,7 +173,7 @@ def snapshot_shutdown_context(received_signal: Any = None) -> Dict[str, Any]:
             takeover_path = Path(hermes_home_str) / ".gateway-takeover.json"
             if takeover_path.exists():
                 try:
-                    raw = takeover_path.read_text(encoding="utf-8")
+                    raw = takeover_path.read_text(encoding="utf-8", errors="replace")
                     ctx["takeover_marker"] = raw[:300]
                     ctx["takeover_marker_for_self"] = (
                         f'"target_pid": {pid}' in raw
@@ -184,7 +184,7 @@ def snapshot_shutdown_context(received_signal: Any = None) -> Dict[str, Any]:
             planned_stop_path = Path(hermes_home_str) / ".gateway-planned-stop.json"
             if planned_stop_path.exists():
                 try:
-                    raw = planned_stop_path.read_text(encoding="utf-8")
+                    raw = planned_stop_path.read_text(encoding="utf-8", errors="replace")
                     ctx["planned_stop_marker"] = raw[:300]
                 except OSError:
                     pass
@@ -241,6 +241,35 @@ def spawn_async_diagnostic(
     )
 
     try:
+        timeout_value = max(float(timeout_seconds), 0.1)
+    except (TypeError, ValueError):
+        timeout_value = 5.0
+
+    # GNU ``timeout`` is not available on a stock macOS installation. Use a
+    # detached bash watchdog instead: job control gives the diagnostic its own
+    # process group, so the watchdog can terminate the whole ps/pstree pipeline
+    # without depending on a platform-specific utility.
+    wrapped_script = (
+        "set -m\n"
+        "(\n"
+        f"{script}\n"
+        ") &\n"
+        "diagnostic_pid=$!\n"
+        "(\n"
+        f"  sleep {timeout_value:.3f}\n"
+        "  kill -TERM -- \"-$diagnostic_pid\" 2>/dev/null || true\n"
+        "  sleep 0.5\n"
+        "  kill -KILL -- \"-$diagnostic_pid\" 2>/dev/null || true\n"
+        ") &\n"
+        "watchdog_pid=$!\n"
+        "wait \"$diagnostic_pid\"\n"
+        "diagnostic_status=$?\n"
+        "kill \"$watchdog_pid\" 2>/dev/null || true\n"
+        "wait \"$watchdog_pid\" 2>/dev/null || true\n"
+        "exit \"$diagnostic_status\"\n"
+    )
+
+    try:
         # Open the log file in append mode and let the subprocess inherit.
         # We use os.O_APPEND so concurrent diagnostics from rapid signals
         # don't trample each other.
@@ -255,7 +284,7 @@ def spawn_async_diagnostic(
         # start_new_session, a SIGKILL on our cgroup takes the diag down
         # before it can flush.
         proc = subprocess.Popen(
-            ["timeout", f"{timeout_seconds:.0f}", "bash", "-c", script],
+            ["bash", "-c", wrapped_script],
             stdout=fd,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
@@ -314,7 +343,7 @@ def format_context_for_log(ctx: Dict[str, Any]) -> str:
 def context_as_json(ctx: Dict[str, Any]) -> str:
     """JSON-serialise a context dict for structured ingestion.  Never raises."""
     try:
-        return json.dumps(ctx, default=str, sort_keys=True)
+        return orjson.dumps(ctx, default=str, option=orjson.OPT_SORT_KEYS).decode('utf-8')
     except (TypeError, ValueError):
         return "{}"
 
@@ -344,7 +373,7 @@ def check_systemd_timing_alignment(drain_timeout: float) -> Optional[Dict[str, A
     unit_name: Optional[str] = None
     try:
         # /proc/self/cgroup gives us "0::/user.slice/.../hermes-gateway.service"
-        with open("/proc/self/cgroup", encoding="utf-8") as fh:
+        with open("/proc/self/cgroup", encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 # systemd cgroup line ends with the unit name
                 if ".service" in line:
@@ -368,7 +397,7 @@ def check_systemd_timing_alignment(drain_timeout: float) -> Optional[Dict[str, A
         try:
             result = subprocess.run(
                 ["systemctl", *flag, "show", unit_name, "--property=TimeoutStopUSec"],
-                capture_output=True, text=True, timeout=2.0,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2.0,
             )
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
             continue

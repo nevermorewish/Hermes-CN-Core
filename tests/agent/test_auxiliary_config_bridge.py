@@ -7,7 +7,9 @@ Also tests the vision_tools and browser_tool model override env vars.
 import os
 import sys
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
+
+import pytest
 
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -208,7 +210,7 @@ class TestGatewayBridgeCodeParity:
         # Path.read_text() defaults to the system locale — which is cp1252
         # on most Western Windows installs and crashes as soon as the file
         # contains any non-ASCII byte (e.g. an em-dash in a comment).
-        content = gateway_path.read_text(encoding="utf-8")
+        content = gateway_path.read_text(encoding="utf-8", errors="replace")
         # Dynamic env-var derivation present
         assert 'f"AUXILIARY_{_upper}_PROVIDER"' in content
         assert 'f"AUXILIARY_{_upper}_MODEL"' in content
@@ -227,7 +229,7 @@ class TestGatewayBridgeCodeParity:
         gateway_path = Path(__file__).parent.parent.parent / "gateway" / "run.py"
         # See note in test_gateway_has_auxiliary_bridge — pin UTF-8 so the
         # test runs on Windows where the default locale is cp1252.
-        content = gateway_path.read_text(encoding="utf-8")
+        content = gateway_path.read_text(encoding="utf-8", errors="replace")
         assert "CONTEXT_COMPRESSION_PROVIDER" not in content
         assert "CONTEXT_COMPRESSION_MODEL" not in content
 
@@ -238,22 +240,30 @@ class TestGatewayBridgeCodeParity:
 class TestVisionModelOverride:
     """Test that AUXILIARY_VISION_MODEL env var overrides the default model in the handler."""
 
-    def test_env_var_overrides_default(self, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_env_var_overrides_default(self, monkeypatch):
         monkeypatch.setenv("AUXILIARY_VISION_MODEL", "openai/gpt-4o")
         from tools.vision_tools import _handle_vision_analyze
-        with patch("tools.vision_tools.vision_analyze_tool", new_callable=MagicMock) as mock_tool:
+        with (
+            patch("tools.vision_tools.vision_analyze_tool", new_callable=AsyncMock) as mock_tool,
+            patch("tools.vision_tools._should_use_native_vision_fast_path", return_value=False),
+        ):
             mock_tool.return_value = '{"success": true}'
-            _handle_vision_analyze({"image_url": "http://test.jpg", "question": "test"})
+            await _handle_vision_analyze({"image_url": "http://test.jpg", "question": "test"})
             call_args = mock_tool.call_args
             # 3rd positional arg = model
             assert call_args[0][2] == "openai/gpt-4o"
 
-    def test_default_model_when_no_override(self, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_default_model_when_no_override(self, monkeypatch):
         monkeypatch.delenv("AUXILIARY_VISION_MODEL", raising=False)
         from tools.vision_tools import _handle_vision_analyze
-        with patch("tools.vision_tools.vision_analyze_tool", new_callable=MagicMock) as mock_tool:
+        with (
+            patch("tools.vision_tools.vision_analyze_tool", new_callable=AsyncMock) as mock_tool,
+            patch("tools.vision_tools._should_use_native_vision_fast_path", return_value=False),
+        ):
             mock_tool.return_value = '{"success": true}'
-            _handle_vision_analyze({"image_url": "http://test.jpg", "question": "test"})
+            await _handle_vision_analyze({"image_url": "http://test.jpg", "question": "test"})
             call_args = mock_tool.call_args
             # With no AUXILIARY_VISION_MODEL env var, model should be None
             # (the centralized call_llm router picks the provider default)
@@ -304,7 +314,7 @@ class TestCLIDefaultsHaveAuxiliaryKeys:
         import cli as _cli_mod
         # See note in test_gateway_has_auxiliary_bridge — pin UTF-8 so the
         # test runs on Windows where the default locale is cp1252.
-        source = Path(_cli_mod.__file__).read_text(encoding="utf-8")
+        source = Path(_cli_mod.__file__).read_text(encoding="utf-8", errors="replace")
         assert "auxiliary_config = defaults.get(\"auxiliary\"" in source
         assert "AUXILIARY_VISION_PROVIDER" in source
         assert "AUXILIARY_VISION_MODEL" in source

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import json
+import orjson
 import tempfile
 from pathlib import Path
 
@@ -47,7 +47,7 @@ def test_write_file_rejection_does_not_mutate_existing_file(tmp_path):
 
     set_edit_approval_requester(lambda _proposal: False)
 
-    result = json.loads(
+    result = orjson.loads(
         handle_function_call(
             "write_file",
             {"path": str(target), "content": "after\n"},
@@ -57,7 +57,7 @@ def test_write_file_rejection_does_not_mutate_existing_file(tmp_path):
 
     assert "error" in result
     assert "Edit approval denied" in result["error"]
-    assert target.read_text(encoding="utf-8") == "before\n"
+    assert target.read_text(encoding="utf-8", errors="replace") == "before\n"
 
 
 def test_write_file_approval_mutates_and_request_includes_diff(tmp_path):
@@ -71,7 +71,7 @@ def test_write_file_approval_mutates_and_request_includes_diff(tmp_path):
 
     set_edit_approval_requester(approve)
 
-    result = json.loads(
+    result = orjson.loads(
         handle_function_call(
             "write_file",
             {"path": str(target), "content": "after\n"},
@@ -79,8 +79,8 @@ def test_write_file_approval_mutates_and_request_includes_diff(tmp_path):
         )
     )
 
-    assert result.get("bytes_written") == len("after\n")
-    assert target.read_text(encoding="utf-8") == "after\n"
+    assert result.get("bytes_written") == target.stat().st_size
+    assert target.read_text(encoding="utf-8", errors="replace") == "after\n"
     assert len(proposals) == 1
     proposal = proposals[0]
     assert proposal.tool_name == "write_file"
@@ -95,7 +95,7 @@ def test_write_file_new_file_request_has_empty_old_text(tmp_path):
 
     set_edit_approval_requester(lambda proposal: proposals.append(proposal) or True)
 
-    result = json.loads(
+    result = orjson.loads(
         handle_function_call(
             "write_file",
             {"path": str(target), "content": "created\n"},
@@ -103,8 +103,8 @@ def test_write_file_new_file_request_has_empty_old_text(tmp_path):
         )
     )
 
-    assert result.get("bytes_written") == len("created\n")
-    assert target.read_text(encoding="utf-8") == "created\n"
+    assert result.get("bytes_written") == target.stat().st_size
+    assert target.read_text(encoding="utf-8", errors="replace") == "created\n"
     assert proposals[0].old_text is None
     assert proposals[0].new_text == "created\n"
 
@@ -118,7 +118,7 @@ def test_requester_exception_denies_and_does_not_mutate(tmp_path):
 
     set_edit_approval_requester(boom)
 
-    result = json.loads(
+    result = orjson.loads(
         handle_function_call(
             "write_file",
             {"path": str(target), "content": "after\n"},
@@ -128,7 +128,7 @@ def test_requester_exception_denies_and_does_not_mutate(tmp_path):
 
     assert "error" in result
     assert "Edit approval denied" in result["error"]
-    assert target.read_text(encoding="utf-8") == "before\n"
+    assert target.read_text(encoding="utf-8", errors="replace") == "before\n"
 
 
 def test_patch_replace_rejection_does_not_mutate(tmp_path):
@@ -137,7 +137,7 @@ def test_patch_replace_rejection_does_not_mutate(tmp_path):
 
     set_edit_approval_requester(lambda _proposal: False)
 
-    result = json.loads(
+    result = orjson.loads(
         handle_function_call(
             "patch",
             {
@@ -152,7 +152,69 @@ def test_patch_replace_rejection_does_not_mutate(tmp_path):
 
     assert "error" in result
     assert "Edit approval denied" in result["error"]
-    assert target.read_text(encoding="utf-8") == "alpha\nbeta\n"
+    assert target.read_text(encoding="utf-8", errors="replace") == "alpha\nbeta\n"
+
+
+def test_patch_v4a_rejection_does_not_mutate(tmp_path):
+    target = tmp_path / "sample.txt"
+    target.write_text("alpha\nbeta\n", encoding="utf-8")
+
+    set_edit_approval_requester(lambda _proposal: False)
+
+    result = orjson.loads(
+        handle_function_call(
+            "patch",
+            {
+                "mode": "patch",
+                "patch": (
+                    "*** Begin Patch\n"
+                    f"*** Update File: {target}\n"
+                    "@@\n"
+                    " alpha\n"
+                    "-beta\n"
+                    "+gamma\n"
+                    "*** End Patch\n"
+                ),
+            },
+            task_id="acp-patch-v4a-reject",
+        )
+    )
+
+    assert "error" in result
+    assert "Edit approval denied" in result["error"]
+    assert target.read_text(encoding="utf-8", errors="replace") == "alpha\nbeta\n"
+
+
+def test_patch_v4a_approval_request_includes_patch_targets(tmp_path):
+    target = tmp_path / "sample.txt"
+    target.write_text("alpha\nbeta\n", encoding="utf-8")
+    proposals = []
+
+    set_edit_approval_requester(lambda proposal: proposals.append(proposal) or False)
+
+    orjson.loads(
+        handle_function_call(
+            "patch",
+            {
+                "mode": "patch",
+                "patch": (
+                    "*** Begin Patch\n"
+                    f"*** Update File: {target}\n"
+                    "@@\n"
+                    " alpha\n"
+                    "-beta\n"
+                    "+gamma\n"
+                    "*** End Patch\n"
+                ),
+            },
+            task_id="acp-patch-v4a-proposal",
+        )
+    )
+
+    assert len(proposals) == 1
+    assert proposals[0].tool_name == "patch"
+    assert proposals[0].path == str(target)
+    assert str(target) in proposals[0].new_text
 
 
 def test_patch_replace_approval_request_includes_full_file_diff(tmp_path):
@@ -162,7 +224,7 @@ def test_patch_replace_approval_request_includes_full_file_diff(tmp_path):
 
     set_edit_approval_requester(lambda proposal: proposals.append(proposal) or True)
 
-    result = json.loads(
+    result = orjson.loads(
         handle_function_call(
             "patch",
             {
@@ -176,7 +238,7 @@ def test_patch_replace_approval_request_includes_full_file_diff(tmp_path):
     )
 
     assert result.get("success") is True
-    assert target.read_text(encoding="utf-8") == "alpha\ngamma\n"
+    assert target.read_text(encoding="utf-8", errors="replace") == "alpha\ngamma\n"
     assert proposals[0].tool_name == "patch"
     assert proposals[0].old_text == "alpha\nbeta\n"
     assert proposals[0].new_text == "alpha\ngamma\n"

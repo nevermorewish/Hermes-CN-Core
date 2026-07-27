@@ -11,7 +11,7 @@ The fix replaces asyncio.run() with a persistent event loop in _run_async().
 """
 
 import asyncio
-import json
+import orjson
 import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -380,13 +380,17 @@ class TestVisionDispatchLoopSafety:
                 "tools.vision_tools._image_to_base64_data_url",
                 return_value="data:image/jpeg;base64,abc",
             ),
+            # resolve_image_source's pre-flight SSRF check resolves DNS live;
+            # under fake-ip DNS proxies every host looks private. Loop
+            # lifetime — not URL safety — is under test here.
+            patch("tools.url_safety.is_safe_url", return_value=True),
         ):
             result_json = registry.dispatch(
                 "vision_analyze",
                 {"image_url": "https://example.com/cat.png", "question": "What is this?"},
             )
 
-        result = json.loads(result_json)
+        result = orjson.loads(result_json)
         assert result.get("success") is True, f"dispatch failed: {result}"
         assert "cat" in result.get("analysis", "").lower()
 
@@ -425,13 +429,15 @@ class TestVisionDispatchLoopSafety:
                 "tools.vision_tools._image_to_base64_data_url",
                 return_value="data:image/jpeg;base64,abc",
             ),
+            # Same fake-ip DNS rationale as test_vision_dispatch_keeps_loop_alive.
+            patch("tools.url_safety.is_safe_url", return_value=True),
         ):
             args = {"image_url": "https://example.com/cat.png", "question": "Describe"}
 
-            r1 = json.loads(registry.dispatch("vision_analyze", args))
+            r1 = orjson.loads(registry.dispatch("vision_analyze", args))
             loop_after_first = _get_tool_loop()
 
-            r2 = json.loads(registry.dispatch("vision_analyze", args))
+            r2 = orjson.loads(registry.dispatch("vision_analyze", args))
             loop_after_second = _get_tool_loop()
 
         assert r1.get("success") is True

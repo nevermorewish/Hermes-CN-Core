@@ -27,7 +27,7 @@ Design notes:
 from __future__ import annotations
 
 import argparse
-import json
+import orjson
 import sys
 from pathlib import Path
 from typing import Optional
@@ -58,8 +58,24 @@ def _read_message_body(
         if file_path == "-":
             return sys.stdin.read()
         try:
+            # Strict decode on purpose: a binary file must fall into the
+            # UnicodeDecodeError branch below, which tells the user to use
+            # MEDIA: instead. errors="replace" would silently send mojibake.
             return Path(file_path).read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as exc:
+        except UnicodeDecodeError:
+            print(
+                f"hermes send: {file_path} is not a text file. --file reads the "
+                "message *body* (logs, reports, markdown).\n"
+                "To send an image/document/audio file as a native attachment, "
+                "reference it with MEDIA: in the message text instead:\n"
+                f'  hermes send --to telegram "MEDIA:{file_path}"\n'
+                f'  hermes send --to telegram "optional caption MEDIA:{file_path}"\n'
+                "Add [[as_document]] to deliver an image as an uncompressed file:\n"
+                f'  hermes send --to telegram "[[as_document]] MEDIA:{file_path}"',
+                file=sys.stderr,
+            )
+            sys.exit(_USAGE_EXIT)
+        except OSError as exc:
             print(f"hermes send: cannot read {file_path}: {exc}", file=sys.stderr)
             sys.exit(_USAGE_EXIT)
 
@@ -93,14 +109,14 @@ def _emit_result(
     parse it, decide success/failure, and format accordingly.
     """
     try:
-        payload = json.loads(result_json) if result_json else {}
-    except json.JSONDecodeError:
+        payload = orjson.loads(result_json) if result_json else {}
+    except orjson.JSONDecodeError:
         # Shouldn't happen with the shared tool, but be defensive — pass the
         # raw string through so the user can still see what went wrong.
         payload = {"error": "invalid JSON from send_message_tool", "raw": result_json}
 
     if json_mode:
-        print(json.dumps(payload, indent=2))
+        print(orjson.dumps(payload, option=orjson.OPT_INDENT_2).decode('utf-8'))
     elif quiet:
         pass
     else:
@@ -114,7 +130,7 @@ def _emit_result(
                 print("sent")
         else:
             # Unknown shape — dump it so nothing is silently dropped.
-            print(json.dumps(payload, indent=2))
+            print(orjson.dumps(payload, option=orjson.OPT_INDENT_2).decode('utf-8'))
 
     if payload.get("error"):
         return _FAILURE_EXIT
@@ -164,7 +180,7 @@ def _list_targets(platform_filter: Optional[str], *, json_mode: bool) -> int:
         platforms = filtered
 
     if json_mode:
-        print(json.dumps({"platforms": platforms}, indent=2, default=str))
+        print(orjson.dumps({"platforms": platforms}, default=str, option=orjson.OPT_INDENT_2).decode('utf-8'))
         return _SUCCESS_EXIT
 
     if not any(platforms.values()):
@@ -252,7 +268,7 @@ def _load_hermes_env() -> None:
         return
 
     try:
-        with open(config_path, "r", encoding="utf-8") as fh:
+        with open(config_path, "r", encoding="utf-8", errors="replace") as fh:
             raw = yaml.safe_load(fh) or {}
     except Exception:
         return
@@ -260,6 +276,14 @@ def _load_hermes_env() -> None:
     try:
         from hermes_cli.config import _expand_env_vars
         raw = _expand_env_vars(raw)
+    except Exception:
+        pass
+
+    # Managed scope: overlay administrator-pinned values before bridging to env,
+    # so a managed top-level scalar wins here too. Fail-open via the helper.
+    try:
+        from hermes_cli import managed_scope
+        raw = managed_scope.apply_managed_overlay(raw if isinstance(raw, dict) else {})
     except Exception:
         pass
 
@@ -367,6 +391,7 @@ def register_send_subparser(subparsers) -> argparse.ArgumentParser:
             "  echo \"RAM 92%\" | hermes send --to telegram:-1001234567890\n"
             "  hermes send --to discord:#ops --file /tmp/report.md\n"
             "  hermes send --to slack:#eng --subject \"[CI]\" --file build.log\n"
+            "  hermes send --to telegram \"MEDIA:/tmp/chart.png\"   # send a media attachment\n"
             "  hermes send --list                  # all platforms\n"
             "  hermes send --list telegram         # filter by platform\n"
             "\n"
@@ -403,7 +428,11 @@ def register_send_subparser(subparsers) -> argparse.ArgumentParser:
         "--file",
         metavar="PATH",
         default=None,
-        help="Read message body from PATH. Use '-' to force stdin.",
+        help=(
+            "Read message body from PATH (text only). Use '-' to force stdin. "
+            "To send an image/document as an attachment, use MEDIA:<path> in "
+            "the message text instead."
+        ),
     )
 
     parser.add_argument(

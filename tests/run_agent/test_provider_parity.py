@@ -4,8 +4,8 @@ and handles responses properly for all supported providers.
 Ensures changes to one provider path don't silently break another.
 """
 
-import base64
-import json
+import pybase64 as base64
+import orjson
 import sys
 import types
 from types import SimpleNamespace
@@ -39,7 +39,7 @@ def _tool_defs(*names):
 
 def _fake_invoke_jwt() -> str:
     def _part(payload):
-        raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        raw = orjson.dumps(payload)
         return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
     return (
@@ -54,6 +54,15 @@ class _FakeOpenAI:
         self.base_url = kw.get("base_url", "http://test")
     def close(self):
         pass
+
+
+@pytest.fixture(autouse=True)
+def _reset_auxiliary_provider_state():
+    from agent.auxiliary_client import _reset_aux_unhealthy_cache
+
+    _reset_aux_unhealthy_cache()
+    yield
+    _reset_aux_unhealthy_cache()
 
 
 def _make_agent(monkeypatch, provider, api_mode="chat_completions", base_url="https://openrouter.ai/api/v1", model=None):
@@ -420,7 +429,7 @@ class TestBuildApiKwargsNousPortal:
         messages = [{"role": "user", "content": "hi"}]
         kwargs = agent._build_api_kwargs(messages)
         extra = kwargs.get("extra_body", {})
-        assert extra.get("tags") == nous_portal_tags()
+        assert extra.get("tags") == nous_portal_tags(session_id=agent.session_id)
 
     def test_uses_chat_completions_format(self, monkeypatch):
         agent = _make_agent(

@@ -7,7 +7,7 @@ Coverage:
                               image attachment state, queue tuple routing
 """
 
-import base64
+import pybase64 as base64
 import os
 import queue
 import subprocess
@@ -910,16 +910,16 @@ class TestPreprocessImagesWithVision:
 
     def _mock_vision_success(self, description="A test image with colored pixels."):
         """Return an async mock that simulates a successful vision_analyze_tool call."""
-        import json
+        import orjson
         async def _fake_vision(**kwargs):
-            return json.dumps({"success": True, "analysis": description})
+            return orjson.dumps({"success": True, "analysis": description}).decode('utf-8')
         return _fake_vision
 
     def _mock_vision_failure(self):
         """Return an async mock that simulates a failed vision_analyze_tool call."""
-        import json
+        import orjson
         async def _fake_vision(**kwargs):
-            return json.dumps({"success": False, "analysis": "Error"})
+            return orjson.dumps({"success": False, "analysis": "Error"}).decode('utf-8')
         return _fake_vision
 
     def test_single_image_with_text(self, cli, tmp_path):
@@ -1144,3 +1144,27 @@ class TestQueueRouting:
         is_command = isinstance(user_input, str) and user_input.startswith("/")
         assert is_command is False
         assert len(submit_images) == 1
+
+
+# ── PowerShell Encoding ──────────────────────────────────────────────────
+
+class TestClipboardPowershellEncoding:
+    """Verify clipboard PowerShell calls handle UTF-8 correctly."""
+
+    def test_run_powershell_has_utf8_encoding(self):
+        """_run_powershell() uses encoding='utf-8' on subprocess.run."""
+        import inspect
+        from hermes_cli import clipboard
+        src = inspect.getsource(clipboard._run_powershell)
+        assert "encoding" in src.lower(), (
+            "_run_powershell must specify encoding='utf-8'"
+        )
+
+    def test_run_powershell_uses_ps_with_utf8(self):
+        """_run_powershell() wraps script with ps_with_utf8()."""
+        import inspect
+        from hermes_cli import clipboard
+        src = inspect.getsource(clipboard._run_powershell)
+        assert "ps_with_utf8" in src, (
+            "_run_powershell must use ps_with_utf8() to prepend encoding preamble"
+        )

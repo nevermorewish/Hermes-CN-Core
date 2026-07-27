@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import argparse
 import csv
-import json
+import orjson
 import sys
 import time
 import urllib.request
@@ -58,12 +58,12 @@ _FIELDS = [
 def _post(body: dict) -> dict:
     req = urllib.request.Request(
         ENDPOINT,
-        data=json.dumps(body).encode("utf-8"),
+        data=orjson.dumps(body),
         headers={"Content-Type": "application/json", "User-Agent": "hermes-agent osint-investigation"},
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=60) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+        return orjson.loads(resp.read().decode("utf-8"))
 
 
 def fetch(
@@ -136,7 +136,7 @@ def fetch(
         time.sleep(0.5)
 
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
-    with open(out_path, "w", newline="", encoding="utf-8") as fh:
+    with open(out_path, "w", newline="", encoding="utf-8", errors="replace") as fh:
         w = csv.DictWriter(fh, fieldnames=COLUMNS)
         w.writeheader()
         w.writerows(rows)

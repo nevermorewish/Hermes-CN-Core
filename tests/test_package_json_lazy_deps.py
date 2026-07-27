@@ -30,7 +30,7 @@ expectations.
 
 from __future__ import annotations
 
-import json
+import orjson
 from pathlib import Path
 
 
@@ -38,8 +38,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _root_package_json() -> dict:
-    with (REPO_ROOT / "package.json").open("r", encoding="utf-8") as fh:
-        return json.load(fh)
+    with (REPO_ROOT / "package.json").open("r", encoding="utf-8", errors="replace") as fh:
+        return orjson.loads(fh.read())
 
 
 def test_camofox_is_not_in_root_dependencies() -> None:
@@ -72,7 +72,7 @@ def test_root_lockfile_has_no_camofox_entries() -> None:
     if not lock_path.exists():
         # Some CI matrix shards skip lockfile materialization.
         return
-    text = lock_path.read_text(encoding="utf-8")
+    text = lock_path.read_text(encoding="utf-8", errors="replace")
     assert "@askjo/camofox-browser" not in text, (
         "package-lock.json still references @askjo/camofox-browser. "
         "Regenerate the lockfile after removing the dep: "

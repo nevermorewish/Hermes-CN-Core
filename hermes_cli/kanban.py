@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import orjson
 import os
 import shlex
 import sys
@@ -26,7 +27,7 @@ from typing import Any, Optional
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_swarm as ks
-from hermes_cli.profiles import get_active_profile_name, get_profile_dir, seed_profile_skills
+from hermes_cli.profiles import get_active_profile_name
 
 
 # ---------------------------------------------------------------------------
@@ -69,6 +70,7 @@ def _task_to_dict(t: kb.Task) -> dict[str, Any]:
         "workspace_kind": t.workspace_kind,
         "workspace_path": t.workspace_path,
         "branch_name": t.branch_name,
+        "project_id": t.project_id,
         "created_by": t.created_by,
         "created_at": t.created_at,
         "started_at": t.started_at,
@@ -314,6 +316,10 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                                "(default: scratch)")
     p_create.add_argument("--branch", default=None,
                           help="Branch name for worktree tasks, e.g. wt/t6-wire")
+    p_create.add_argument("--project", default=None,
+                          help="Link to a project (id or slug). Anchors the task's "
+                               "worktree under the project's primary repo with a "
+                               "deterministic branch. See `hermes project list`.")
     p_create.add_argument("--tenant", default=None, help="Tenant namespace")
     p_create.add_argument("--priority", type=int, default=0, help="Priority tiebreaker")
     p_create.add_argument("--triage", action="store_true",
@@ -330,8 +336,8 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                           help="Author name recorded on the task (default: user)")
     p_create.add_argument("--skill", action="append", default=[], dest="skills",
                           help="Skill to force-load into the worker "
-                               "(repeatable). Appended to the built-in "
-                               "kanban-worker skill. Example: "
+                               "(repeatable). The kanban lifecycle is already "
+                               "injected automatically. Example: "
                                "--skill translation --skill github-code-review")
     p_create.add_argument("--max-retries", type=int, default=None,
                           metavar="N",
@@ -517,6 +523,24 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_comment.add_argument("--max-len", type=int, default=None,
                            help="Trim the stored comment body to this many characters")
 
+    # --- attach / attachments / attach-rm ---
+    p_attach = sub.add_parser("attach", help="Attach a local file to a task")
+    p_attach.add_argument("task_id")
+    p_attach.add_argument("path", help="Path to the local file to attach")
+    p_attach.add_argument("--content-type", default=None,
+                          help="MIME type (default: guessed from the file extension)")
+    p_attach.add_argument("--name", default=None,
+                          help="Stored filename (default: the source file's basename)")
+    p_attach.add_argument("--author", default=None,
+                          help="uploaded_by label (default: $HERMES_PROFILE or 'user')")
+
+    p_attachments = sub.add_parser("attachments", help="List a task's attachments")
+    p_attachments.add_argument("task_id")
+    p_attachments.add_argument("--json", action="store_true")
+
+    p_attach_rm = sub.add_parser("attach-rm", help="Delete an attachment by id")
+    p_attach_rm.add_argument("attachment_id", type=int)
+
     p_complete = sub.add_parser("complete", help="Mark one or more tasks done")
     p_complete.add_argument("task_ids", nargs="+",
                             help="One or more task ids (only --result applies to all of them)")
@@ -554,6 +578,16 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_block.add_argument("reason", nargs="*", help="Reason (also appended as a comment)")
     p_block.add_argument("--ids", nargs="+", default=None,
                          help="Additional task ids to block with the same reason (bulk mode)")
+    p_block.add_argument(
+        "--kind", default=None, choices=sorted(kb.VALID_BLOCK_KINDS),
+        help=(
+            "Typed block reason. 'dependency' waits in todo (auto-promoted "
+            "when parents finish, no human); 'needs_input'/'capability' go to "
+            "blocked for a human; 'transient' marks a maybe-flaky failure. "
+            "Repeated same-kind re-blocks after unblock route the task to "
+            "triage to break unblock loops. Omit for a generic block."
+        ),
+    )
 
     p_schedule = sub.add_parser("schedule", help="Park one or more tasks in Scheduled (waiting on time, not human input)")
     p_schedule.add_argument("task_id")
@@ -561,7 +595,10 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_schedule.add_argument("--ids", nargs="+", default=None,
                             help="Additional task ids to schedule with the same reason (bulk mode)")
 
-    p_unblock = sub.add_parser("unblock", help="Return one or more blocked/scheduled tasks to ready")
+    p_unblock = sub.add_parser(
+        "unblock",
+        help="Return blocked/scheduled tasks to ready, or todo while parents remain open",
+    )
     p_unblock.add_argument(
         "--reason",
         default=None,
@@ -936,6 +973,9 @@ def kanban_command(args: argparse.Namespace) -> int:
             "unlink":   _cmd_unlink,
             "claim":    _cmd_claim,
             "comment":  _cmd_comment,
+            "attach":   _cmd_attach,
+            "attachments": _cmd_attachments,
+            "attach-rm": _cmd_attach_rm,
             "complete": _cmd_complete,
             "edit":     _cmd_edit,
             "block":    _cmd_block,
@@ -1045,7 +1085,7 @@ def _cmd_boards_list(args: argparse.Namespace) -> int:
         b["counts"] = _board_task_counts(b["slug"])
         b["total"] = sum(b["counts"].values())
     if getattr(args, "json", False):
-        print(json.dumps(boards, indent=2, ensure_ascii=False))
+        print(orjson.dumps(boards, option=orjson.OPT_INDENT_2).decode('utf-8'))
         return 0
     # Human table: marker (•) for current, slug, display name, counts.
     if not boards:
@@ -1223,21 +1263,6 @@ def _cmd_init(args: argparse.Namespace) -> int:
     path = kb.init_db()
     print(f"Kanban DB initialized at {path}")
 
-    # Seed bundled skills (e.g. kanban-worker) into the active profile so
-    # the kanban dispatcher can use them without a separate `hermes profile
-    # create` step.  This is best-effort — a missing or broken profile is
-    # not fatal to `kanban init`.
-    try:
-        profile_name = get_active_profile_name() or "default"
-        profile_dir = get_profile_dir(profile_name)
-        result = seed_profile_skills(profile_dir, quiet=True)
-        if result:
-            copied = result.get("copied", [])
-            if copied:
-                print(f"Seeded skill(s) into profile {profile_name}: {', '.join(copied)}")
-    except Exception:
-        pass  # best-effort
-
     print()
     # Enumerate profiles on disk so the user knows what assignees are
     # already addressable. Multica does this auto-detection on its
@@ -1287,7 +1312,7 @@ def _cmd_assignees(args: argparse.Namespace) -> int:
     with kb.connect_closing() as conn:
         data = kb.known_assignees(conn)
     if getattr(args, "json", False):
-        print(json.dumps(data, indent=2, ensure_ascii=False))
+        print(orjson.dumps(data, option=orjson.OPT_INDENT_2).decode('utf-8'))
         return 0
     if not data:
         print("(no assignees — create a profile with `hermes -p <name> setup`)")
@@ -1335,6 +1360,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
             workspace_kind=ws_kind,
             workspace_path=ws_path,
             branch_name=branch_name,
+            project_id=getattr(args, "project", None),
             tenant=args.tenant,
             priority=args.priority,
             parents=tuple(args.parent or ()),
@@ -1349,7 +1375,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
         )
         task = kb.get_task(conn, task_id)
     if getattr(args, "json", False):
-        print(json.dumps(_task_to_dict(task), indent=2, ensure_ascii=False))
+        print(orjson.dumps(_task_to_dict(task), option=orjson.OPT_INDENT_2).decode('utf-8'))
     else:
         print(f"Created {task_id}  ({task.status}, assignee={task.assignee or '-'})")
 
@@ -1389,7 +1415,7 @@ def _cmd_swarm(args: argparse.Namespace) -> int:
             idempotency_key=getattr(args, "idempotency_key", None),
         )
     if getattr(args, "json", False):
-        print(json.dumps(created.as_dict(), indent=2, ensure_ascii=False))
+        print(orjson.dumps(created.as_dict(), option=orjson.OPT_INDENT_2).decode('utf-8'))
     else:
         print(f"Swarm root: {created.root_id}")
         print("Workers: " + ", ".join(created.worker_ids))
@@ -1418,7 +1444,7 @@ def _cmd_list(args: argparse.Namespace) -> int:
             current_step_key=args.current_step_key,
         )
     if getattr(args, "json", False):
-        print(json.dumps([_task_to_dict(t) for t in tasks], indent=2, ensure_ascii=False))
+        print(orjson.dumps([_task_to_dict(t) for t in tasks], option=orjson.OPT_INDENT_2).decode('utf-8'))
         return 0
     # Passive discoverability: when the user has multiple boards, surface
     # which one they're looking at in the list header. Single-board users
@@ -1461,8 +1487,7 @@ def _cmd_show(args: argparse.Namespace) -> int:
         parents = kb.parent_ids(conn, args.task_id)
         children = kb.child_ids(conn, args.task_id)
         runs = kb.list_runs(conn, args.task_id, **rsk)
-        # Workers hand off via ``task_runs.summary`` (kanban-worker skill);
-        # ``tasks.result`` is left NULL unless the caller explicitly passed
+        # Workers hand off via ``task_runs.summary``; ``tasks.result`` is left NULL unless the caller explicitly passed
         # ``result=``. Surfacing the latest summary here keeps ``show`` from
         # looking like a no-op when the worker actually did real work.
         latest_summary = kb.latest_summary(conn, args.task_id)
@@ -1503,7 +1528,7 @@ def _cmd_show(args: argparse.Namespace) -> int:
                 for r in runs
             ],
         }
-        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        print(orjson.dumps(payload, option=orjson.OPT_INDENT_2).decode('utf-8'))
         return 0
 
     print(f"Task {task.id}: {task.title}")
@@ -1755,7 +1780,7 @@ def _cmd_diagnostics(args: argparse.Namespace) -> int:
             }
             for tid, dl in diags_by_task.items()
         ]
-        print(json.dumps(out_json, indent=2, ensure_ascii=False))
+        print(orjson.dumps(out_json, option=orjson.OPT_INDENT_2).decode('utf-8'))
         return 0
 
     if not diags_by_task:
@@ -1851,6 +1876,84 @@ def _cmd_comment(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_attach(args: argparse.Namespace) -> int:
+    """Attach a local file to a task.
+
+    Reads the file off disk, writes it under the task's attachments dir,
+    and records the metadata row via the shared ``store_attachment_bytes``
+    path (same code the dashboard upload and the agent tool use), so the
+    25 MB cap and name-sanitisation behave identically everywhere.
+    """
+    import mimetypes
+
+    src = Path(args.path).expanduser()
+    if not src.is_file():
+        print(f"kanban: no such file: {src}", file=sys.stderr)
+        return 1
+    data = src.read_bytes()
+    name = args.name or src.name
+    content_type = args.content_type or mimetypes.guess_type(name)[0]
+    uploaded_by = args.author or _profile_author()
+    try:
+        with kb.connect_closing() as conn:
+            att_id = kb.store_attachment_bytes(
+                conn,
+                args.task_id,
+                name,
+                data,
+                content_type=content_type,
+                uploaded_by=uploaded_by,
+            )
+    except kb.AttachmentTooLarge as exc:
+        print(f"kanban: {exc}", file=sys.stderr)
+        return 1
+    print(f"Attached {name} to {args.task_id} (attachment {att_id}, {len(data)} bytes)")
+    return 0
+
+
+def _cmd_attachments(args: argparse.Namespace) -> int:
+    """List a task's attachments."""
+    with kb.connect_closing() as conn:
+        if kb.get_task(conn, args.task_id) is None:
+            print(f"no such task: {args.task_id}", file=sys.stderr)
+            return 1
+        atts = kb.list_attachments(conn, args.task_id)
+    if getattr(args, "json", False):
+        print(json.dumps([
+            {
+                "id": a.id,
+                "filename": a.filename,
+                "content_type": a.content_type,
+                "size": a.size,
+                "uploaded_by": a.uploaded_by,
+                "stored_path": a.stored_path,
+                "created_at": a.created_at,
+            }
+            for a in atts
+        ], indent=2))
+        return 0
+    if not atts:
+        print(f"No attachments on {args.task_id}")
+        return 0
+    print(f"Attachments on {args.task_id}:")
+    for a in atts:
+        ct = a.content_type or "-"
+        print(f"  [{a.id}] {a.filename}  ({a.size} bytes, {ct}, by {a.uploaded_by or '-'})")
+        print(f"        {a.stored_path}")
+    return 0
+
+
+def _cmd_attach_rm(args: argparse.Namespace) -> int:
+    """Delete an attachment by id (removes the row and the on-disk blob)."""
+    with kb.connect_closing() as conn:
+        removed = kb.delete_attachment(conn, args.attachment_id)
+    if removed is None:
+        print(f"no such attachment: {args.attachment_id}", file=sys.stderr)
+        return 1
+    print(f"Deleted attachment {args.attachment_id} ({removed.filename}) from {removed.task_id}")
+    return 0
+
+
 def _worker_run_id_for(task_id: str) -> Optional[int]:
     if os.environ.get("HERMES_KANBAN_TASK") != task_id:
         return None
@@ -1885,15 +1988,59 @@ def _cmd_complete(args: argparse.Namespace) -> int:
     metadata = None
     if raw_meta:
         try:
-            metadata = json.loads(raw_meta)
+            metadata = orjson.loads(raw_meta)
             if not isinstance(metadata, dict):
                 raise ValueError("must be a JSON object")
-        except (ValueError, json.JSONDecodeError) as exc:
+        except (ValueError, orjson.JSONDecodeError) as exc:
             print(f"kanban: --metadata: {exc}", file=sys.stderr)
             return 2
     failed: list[str] = []
     with kb.connect_closing() as conn:
         for tid in ids:
+            # Goal-mode pre-completion judge gate (mirrors the gate in
+            # tools/kanban_tools.py:_handle_complete — Issue #38367).
+            # Without this, a goal_mode worker can call
+            # `hermes kanban complete <id>` from the terminal tool and
+            # bypass the auxiliary judge that the tool-call path enforces.
+            task = kb.get_task(conn, tid)
+            if task and task.goal_mode:
+                judge_available = False
+                try:
+                    from agent.auxiliary_client import get_text_auxiliary_client
+                    _client, _model = get_text_auxiliary_client("goal_judge")
+                    judge_available = _client is not None and bool(_model)
+                except Exception:
+                    pass
+                if judge_available:
+                    from hermes_cli.goals import judge_goal
+                    verdict = "done"
+                    reason = ""
+                    try:
+                        # judge_goal returns (verdict, reason, parse_failed,
+                        # wait_directive, transport_failed) — see
+                        # hermes_cli/goals.py. Unpacking fewer raises
+                        # ValueError into the fail-open handler below,
+                        # silently disabling the gate.
+                        verdict, reason, _, _, _ = judge_goal(
+                            goal=f"{task.title}\n\n{task.body or ''}".strip(),
+                            last_response=(summary or args.result or "").strip(),
+                        )
+                    except Exception as judge_exc:
+                        import logging as _logging
+                        _logging.getLogger(__name__).warning(
+                            "goal judge check failed, allowing completion: %s",
+                            judge_exc,
+                            exc_info=True,
+                        )
+                    if verdict != "done":
+                        print(
+                            f"kanban: goal completion of {tid} rejected by judge: {reason}. "
+                            f"Provide evidence matching the task's acceptance criteria.",
+                            file=sys.stderr,
+                        )
+                        failed.append(tid)
+                        continue
+
             if not kb.complete_task(
                 conn, tid,
                 result=args.result,
@@ -1913,10 +2060,10 @@ def _cmd_edit(args: argparse.Namespace) -> int:
     metadata = None
     if raw_meta:
         try:
-            metadata = json.loads(raw_meta)
+            metadata = orjson.loads(raw_meta)
             if not isinstance(metadata, dict):
                 raise ValueError("must be a JSON object")
-        except (ValueError, json.JSONDecodeError) as exc:
+        except (ValueError, orjson.JSONDecodeError) as exc:
             print(f"kanban: --metadata: {exc}", file=sys.stderr)
             return 2
     with kb.connect_closing() as conn:
@@ -1938,6 +2085,7 @@ def _cmd_edit(args: argparse.Namespace) -> int:
 
 def _cmd_block(args: argparse.Namespace) -> int:
     reason = " ".join(args.reason).strip() if args.reason else None
+    kind = getattr(args, "kind", None)
     author = _profile_author()
     ids = [args.task_id] + list(getattr(args, "ids", None) or [])
     failed: list[str] = []
@@ -1949,12 +2097,26 @@ def _cmd_block(args: argparse.Namespace) -> int:
                 conn,
                 tid,
                 reason=reason,
+                kind=kind,
                 expected_run_id=_worker_run_id_for(tid),
             ):
                 failed.append(tid)
                 print(f"cannot block {tid}", file=sys.stderr)
             else:
-                print(f"Blocked {tid}" + (f": {reason}" if reason else ""))
+                # Report where the task actually landed — dependency blocks go
+                # to todo, and a tripped unblock-loop breaker routes to triage.
+                landed = kb.get_task(conn, tid)
+                where = landed.status if landed else "blocked"
+                suffix = f": {reason}" if reason else ""
+                if where == "todo":
+                    print(f"{tid} → todo (dependency wait){suffix}")
+                elif where == "triage":
+                    print(
+                        f"{tid} → triage (unblock loop detected — needs a "
+                        f"human decision){suffix}"
+                    )
+                else:
+                    print(f"Blocked {tid}{suffix}")
     return 0 if not failed else 1
 
 
@@ -2039,7 +2201,7 @@ def _cmd_promote(args: argparse.Namespace) -> int:
     if as_json:
         # Single-id stays a flat object for back-compat; bulk emits a list.
         payload: object = results[0] if len(results) == 1 else results
-        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        print(orjson.dumps(payload, option=orjson.OPT_INDENT_2).decode('utf-8'))
         return 0 if not failed else 1
 
     tag = " (dry)" if args.dry_run else ""
@@ -2148,7 +2310,7 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             max_in_progress_per_profile=max_in_progress_per_profile,
         )
     if getattr(args, "json", False):
-        print(json.dumps({
+        print(orjson.dumps({
             "reclaimed": res.reclaimed,
             "crashed": res.crashed,
             "timed_out": res.timed_out,
@@ -2166,7 +2328,7 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
                 for (tid, who, current) in res.skipped_per_profile_capped
             ],
             "auto_assigned_default": res.auto_assigned_default,
-        }, indent=2))
+        }, option=orjson.OPT_INDENT_2).decode('utf-8'))
         return 0
     print(f"Reclaimed:    {res.reclaimed}")
     print(f"Crashed:      {len(res.crashed)}")
@@ -2381,7 +2543,7 @@ def _cmd_watch(args: argparse.Namespace) -> int:
                 if args.tenant and r["tenant"] != args.tenant:
                     continue
                 try:
-                    payload = json.loads(r["payload"]) if r["payload"] else None
+                    payload = orjson.loads(r["payload"]) if r["payload"] else None
                 except Exception:
                     payload = None
                 pl = f" {payload}" if payload else ""
@@ -2400,7 +2562,7 @@ def _cmd_stats(args: argparse.Namespace) -> int:
     with kb.connect_closing() as conn:
         stats = kb.board_stats(conn)
     if getattr(args, "json", False):
-        print(json.dumps(stats, indent=2, ensure_ascii=False))
+        print(orjson.dumps(stats, option=orjson.OPT_INDENT_2).decode('utf-8'))
         return 0
     print("By status:")
     for k in ("triage", "todo", "scheduled", "ready", "running", "blocked", "done"):
@@ -2437,7 +2599,7 @@ def _cmd_notify_list(args: argparse.Namespace) -> int:
     with kb.connect_closing() as conn:
         subs = kb.list_notify_subs(conn, args.task_id)
     if getattr(args, "json", False):
-        print(json.dumps(subs, indent=2, ensure_ascii=False))
+        print(orjson.dumps(subs, option=orjson.OPT_INDENT_2).decode('utf-8'))
         return 0
     if not subs:
         print("(no subscriptions)")
@@ -2488,7 +2650,7 @@ def _cmd_runs(args: argparse.Namespace) -> int:
     with kb.connect_closing() as conn:
         runs = kb.list_runs(conn, args.task_id, **rsk)
     if getattr(args, "json", False):
-        print(json.dumps([
+        print(orjson.dumps([
             {
                 "id": r.id, "profile": r.profile, "status": r.status,
                 "outcome": r.outcome, "started_at": r.started_at,
@@ -2496,7 +2658,7 @@ def _cmd_runs(args: argparse.Namespace) -> int:
                 "error": r.error, "metadata": r.metadata,
                 "worker_pid": r.worker_pid, "step_key": r.step_key,
             } for r in runs
-        ], indent=2, ensure_ascii=False))
+        ], option=orjson.OPT_INDENT_2).decode('utf-8'))
         return 0
     if not runs:
         print(f"(no runs yet for {args.task_id})")
@@ -2556,7 +2718,7 @@ def _cmd_specify(args: argparse.Namespace) -> int:
                 + "."
             )
             if want_json:
-                print(json.dumps({"specified": 0, "total": 0}))
+                print(orjson.dumps({"specified": 0, "total": 0}).decode('utf-8'))
             else:
                 print(msg)
             return 0
@@ -2578,12 +2740,12 @@ def _cmd_specify(args: argparse.Namespace) -> int:
         else:
             fail_count += 1
         if want_json:
-            print(json.dumps({
+            print(orjson.dumps({
                 "task_id": outcome.task_id,
                 "ok": outcome.ok,
                 "reason": outcome.reason,
                 "new_title": outcome.new_title,
-            }))
+            }).decode('utf-8'))
         elif outcome.ok:
             title_suffix = (
                 f" — retitled: {outcome.new_title!r}"
@@ -2630,7 +2792,7 @@ def _cmd_decompose(args: argparse.Namespace) -> int:
                 + "."
             )
             if want_json:
-                print(json.dumps({"decomposed": 0, "total": 0}))
+                print(orjson.dumps({"decomposed": 0, "total": 0}).decode('utf-8'))
             else:
                 print(msg)
             return 0
@@ -2649,14 +2811,14 @@ def _cmd_decompose(args: argparse.Namespace) -> int:
         if outcome.ok:
             ok_count += 1
         if want_json:
-            print(json.dumps({
+            print(orjson.dumps({
                 "task_id": outcome.task_id,
                 "ok": outcome.ok,
                 "reason": outcome.reason,
                 "fanout": outcome.fanout,
                 "child_ids": outcome.child_ids,
                 "new_title": outcome.new_title,
-            }))
+            }).decode('utf-8'))
         elif outcome.ok:
             if outcome.fanout and outcome.child_ids:
                 child_summary = ", ".join(outcome.child_ids)
@@ -2738,6 +2900,7 @@ Common subcommands:
   `stats`               Per-status / per-assignee counts
   `create <title>…`     Create a task (auto-subscribes you to events)
   `comment <id> <msg>`  Append a comment
+  `attach <id> <path>`  Attach a local file; `attachments <id>` to list
   `complete <id>…`      Mark task(s) done
   `block <id> [reason]` Mark blocked; `schedule <id> [reason]` parks time-delay work; `unblock <id>` to revive
   `assign <id> <profile>`  Reassign
@@ -2762,7 +2925,18 @@ def run_slash(rest: str) -> str:
     import io
     import contextlib
 
-    tokens = shlex.split(rest) if rest and rest.strip() else []
+    if rest and rest.strip():
+        if os.name == "nt":
+            # POSIX shlex parsing strips backslashes, mangling Windows paths
+            # like C:\Users\... — parse non-POSIX and unquote manually.
+            tokens = [
+                t[1:-1] if len(t) >= 2 and t[0] == t[-1] and t[0] in "\"'" else t
+                for t in shlex.split(rest, posix=False)
+            ]
+        else:
+            tokens = shlex.split(rest)
+    else:
+        tokens = []
 
     # Bare ``/kanban`` or ``/kanban help`` / ``--help`` / ``-h`` / ``?``:
     # show the curated short-help block instead of dumping argparse's full

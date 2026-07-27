@@ -21,7 +21,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 def _get_preexec_fn_values(filepath: Path) -> list:
     """Find all preexec_fn= keyword arguments in Popen calls."""
-    source = filepath.read_text(encoding="utf-8")
+    source = filepath.read_text(encoding="utf-8", errors="replace")
     tree = ast.parse(source, filename=str(filepath))
     values = []
     for node in ast.walk(tree):
@@ -46,6 +46,25 @@ class TestNoUnconditionalSetsid:
             )
 
 
+class TestStartNewSession:
+    """All guarded files must use start_new_session=True instead of preexec_fn."""
+
+    @pytest.mark.parametrize("relpath", GUARDED_FILES)
+    def test_uses_start_new_session(self, relpath):
+        """Each guarded file must use start_new_session=True for process isolation."""
+        filepath = PROJECT_ROOT / relpath
+        if not filepath.exists():
+            pytest.skip(f"{relpath} not found")
+        source = filepath.read_text(encoding="utf-8", errors="replace")
+        # Files should use start_new_session=True, not preexec_fn
+        assert "preexec_fn" not in source, (
+            f"{relpath} still uses preexec_fn; use start_new_session=True instead"
+        )
+        assert "start_new_session=True" in source, (
+            f"{relpath} missing start_new_session=True in Popen call"
+        )
+
+
 class TestIsWindowsConstant:
     """Each guarded file must define _IS_WINDOWS."""
 
@@ -54,7 +73,7 @@ class TestIsWindowsConstant:
         filepath = PROJECT_ROOT / relpath
         if not filepath.exists():
             pytest.skip(f"{relpath} not found")
-        source = filepath.read_text(encoding="utf-8")
+        source = filepath.read_text(encoding="utf-8", errors="replace")
         assert "_IS_WINDOWS" in source, (
             f"{relpath} missing _IS_WINDOWS platform guard"
         )
@@ -68,7 +87,7 @@ class TestKillpgGuarded:
         filepath = PROJECT_ROOT / relpath
         if not filepath.exists():
             pytest.skip(f"{relpath} not found")
-        source = filepath.read_text(encoding="utf-8")
+        source = filepath.read_text(encoding="utf-8", errors="replace")
         lines = source.splitlines()
         for i, line in enumerate(lines):
             stripped = line.strip()

@@ -1,7 +1,7 @@
 """Tests for MCP tool structuredContent preservation."""
 
 import asyncio
-import json
+import orjson
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -57,6 +57,9 @@ def _patch_mcp_server():
     # ~L2008) to serialize JSON-RPC against the server — build it inside the
     # fresh loop that _fake_run_on_mcp_loop spins up, not at fixture import.
     fake_server = SimpleNamespace(session=fake_session, _rpc_lock=None)
+    # Close any circuit breaker left open for this server name by earlier
+    # tests — breaker state is process-global and keyed by server name.
+    mcp_tool._reset_server_error("test-server")
     with patch.dict(mcp_tool._servers, {"test-server": fake_server}), \
          patch("tools.mcp_tool._run_on_mcp_loop", side_effect=_fake_run_on_mcp_loop):
         yield fake_session
@@ -75,7 +78,7 @@ class TestStructuredContentPreservation:
         )
         handler = mcp_tool._make_tool_handler("test-server", "my-tool", 30.0)
         raw = handler({})
-        data = json.loads(raw)
+        data = orjson.loads(raw)
         assert data == {"result": "hello"}
 
     def test_both_content_and_structured(self, _patch_mcp_server):
@@ -90,7 +93,7 @@ class TestStructuredContentPreservation:
         )
         handler = mcp_tool._make_tool_handler("test-server", "my-tool", 30.0)
         raw = handler({})
-        data = json.loads(raw)
+        data = orjson.loads(raw)
         # content is the primary result, structuredContent is supplementary
         assert data["result"] == "OK"
         assert data["structuredContent"] == payload
@@ -109,7 +112,7 @@ class TestStructuredContentPreservation:
         )
         handler = mcp_tool._make_tool_handler("test-server", "my-tool", 30.0)
         raw = handler({})
-        data = json.loads(raw)
+        data = orjson.loads(raw)
         assert data["result"] == file_text
         assert data["structuredContent"] == metadata
 
@@ -124,7 +127,7 @@ class TestStructuredContentPreservation:
         )
         handler = mcp_tool._make_tool_handler("test-server", "my-tool", 30.0)
         raw = handler({})
-        data = json.loads(raw)
+        data = orjson.loads(raw)
         assert data == {"result": "done"}
 
     def test_empty_text_with_structured_content(self, _patch_mcp_server):
@@ -139,5 +142,5 @@ class TestStructuredContentPreservation:
         )
         handler = mcp_tool._make_tool_handler("test-server", "my-tool", 30.0)
         raw = handler({})
-        data = json.loads(raw)
+        data = orjson.loads(raw)
         assert data["result"] == payload

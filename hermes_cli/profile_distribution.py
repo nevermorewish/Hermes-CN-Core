@@ -60,8 +60,7 @@ Update semantics:
 """
 
 from __future__ import annotations
-
-import re
+from agent.re_compat import re
 import shutil
 import subprocess
 import tempfile
@@ -262,7 +261,7 @@ def read_manifest(profile_dir: Path) -> Optional[DistributionManifest]:
     if not mf_path.is_file():
         return None
     try:
-        data = _load_yaml(mf_path.read_text(encoding="utf-8"))
+        data = _load_yaml(mf_path.read_text(encoding="utf-8", errors="replace"))
     except Exception as exc:
         raise DistributionError(f"Failed to parse {mf_path}: {exc}") from exc
     return DistributionManifest.from_dict(data or {})
@@ -573,10 +572,15 @@ def _copy_dist_payload(
         if entry.is_dir():
             if dest.exists():
                 shutil.rmtree(dest)
+            staged_resolved = staged.resolve()
             shutil.copytree(
                 entry,
                 dest,
-                ignore=lambda d, names: [n for n in names if n in USER_OWNED_EXCLUDE],
+                ignore=lambda d, names: (
+                    [n for n in names if n in USER_OWNED_EXCLUDE]
+                    if Path(d).resolve() == staged_resolved
+                    else []
+                ),
             )
         else:
             shutil.copy2(entry, dest)

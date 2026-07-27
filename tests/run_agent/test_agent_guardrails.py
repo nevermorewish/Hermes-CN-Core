@@ -8,10 +8,26 @@ Covers three static methods on AIAgent (inspired by PR #1321 — @alireza78a):
 
 import types
 
-from run_agent import AIAgent
-from tools.delegate_tool import _get_max_concurrent_children
+import pytest
 
-MAX_CONCURRENT_CHILDREN = _get_max_concurrent_children()
+from run_agent import AIAgent
+
+# Pin the concurrency limit instead of reading the runtime config.
+# _cap_delegate_task_calls() resolves _get_max_concurrent_children() at CALL
+# time (inside a per-test hermetic HERMES_HOME), but this module previously
+# froze the value at IMPORT time — before the hermetic fixture ran — so a
+# developer machine with delegation.max_concurrent_children in the real
+# ~/.hermes/config.yaml saw a different limit at import vs call and the
+# truncation tests failed locally while passing on CI.
+MAX_CONCURRENT_CHILDREN = 3
+
+
+@pytest.fixture(autouse=True)
+def _pin_max_concurrent_children(monkeypatch):
+    monkeypatch.setattr(
+        "tools.delegate_tool._get_max_concurrent_children",
+        lambda: MAX_CONCURRENT_CHILDREN,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +123,159 @@ class TestSanitizeApiMessages:
         out = AIAgent._sanitize_api_messages(msgs)
         assert len(out) == 2
         assert out[1]["tool_call_id"] == "c6"
+
+    def test_tool_result_with_leading_whitespace_preserved(self):
+        """Tool result IDs with leading/trailing whitespace should match assistant call IDs."""
+        msgs = [
+            {"role": "assistant", "tool_calls": [assistant_dict_call("functions.cronjob:24")]},
+            tool_result(" functions.cronjob:24"),  # leading whitespace
+        ]
+        out = AIAgent._sanitize_api_messages(msgs)
+        # Should NOT inject a stub — the tool result is valid after stripping
+        assert len(out) == 2
+        assert out[1]["role"] == "tool"
+        assert out[1]["content"] == "ok"
+
+    def test_truly_orphaned_with_whitespace_still_removed(self):
+        """Truly orphaned tool results with whitespace should still be removed."""
+        msgs = [
+            {"role": "assistant", "tool_calls": [assistant_dict_call("c_valid")]},
+            tool_result(" c_ORPHAN "),  # whitespace + no matching call
+        ]
+        out = AIAgent._sanitize_api_messages(msgs)
+        assert len(out) == 2  # assistant + stub for c_valid, orphan removed
+        tool_msgs = [m for m in out if m["role"] == "tool"]
+        assert len(tool_msgs) == 1
+        assert tool_msgs[0]["tool_call_id"] == "c_valid"
+
+
+# --- Empty-content filtering (MiMo bugfix) ---
+
+def test_drops_assistant_with_empty_content_and_no_tool_calls():
+    """sanitize_api_messages drops assistant messages that have content=\"\" and no tool_calls."""
+    msgs = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "", "tool_calls": None},
+        {"role": "user", "content": "follow-up"},
+    ]
+    out = AIAgent._sanitize_api_messages(msgs)
+    assert len(out) == 2
+    assert out[0]["role"] == "user"
+    assert out[0]["content"] == "hello"
+    assert out[1]["role"] == "user"
+    assert out[1]["content"] == "follow-up"
+
+
+def test_drops_user_with_empty_content():
+    """sanitize_api_messages drops user messages with content=\"\" and no tool_calls."""
+    msgs = [
+        {"role": "system", "content": "You are helpful."},
+        {"role": "user", "content": ""},
+        {"role": "assistant", "content": "hi"},
+    ]
+    out = AIAgent._sanitize_api_messages(msgs)
+    assert len(out) == 2
+    assert out[0]["role"] == "system"
+    assert out[1]["role"] == "assistant"
+
+
+def test_preserves_assistant_with_empty_content_but_with_tool_calls():
+    """Assistant with content=\"\" but valid tool_calls must be preserved (it has payload)."""
+    msgs = [
+        {"role": "user", "content": "search something"},
+        {"role": "assistant", "content": "",
+         "tool_calls": [{"id": "c1", "function": {"name": "web_search", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "c1", "content": "results"},
+    ]
+    out = AIAgent._sanitize_api_messages(msgs)
+    assert len(out) == 3
+    roles = [m["role"] for m in out]
+    assert roles == ["user", "assistant", "tool"]
+
+
+def test_preserves_assistant_with_non_empty_content():
+    """Assistant with non-empty content and no tool_calls must be preserved."""
+    msgs = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi there"},
+    ]
+    out = AIAgent._sanitize_api_messages(msgs)
+    assert out == msgs
+
+
+def test_preserves_system_with_empty_content():
+    """System messages with empty content should NOT be dropped (edge case, provider-dependent)."""
+    msgs = [
+        {"role": "system", "content": ""},
+        {"role": "user", "content": "hello"},
+    ]
+    out = AIAgent._sanitize_api_messages(msgs)
+    assert len(out) == 2  # system preserved
+
+
+def test_drops_function_with_empty_content():
+    """Function messages with empty content should be dropped (legacy role, same as assistant)."""
+    msgs = [
+        {"role": "function", "content": ""},
+        {"role": "user", "content": "hello"},
+    ]
+    out = AIAgent._sanitize_api_messages(msgs)
+    assert len(out) == 1
+    assert out[0]["role"] == "user"
+
+
+def test_multiple_empty_content_messages_dropped():
+    """Multiple consecutive empty-content messages all get dropped."""
+    msgs = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": ""},
+        {"role": "assistant", "content": ""},
+        {"role": "user", "content": ""},
+        {"role": "assistant", "content": "final answer"},
+    ]
+    out = AIAgent._sanitize_api_messages(msgs)
+    assert len(out) == 2
+    assert out[0]["role"] == "user"
+    assert out[0]["content"] == "hello"
+    assert out[1]["role"] == "assistant"
+    assert out[1]["content"] == "final answer"
+
+
+def test_empty_content_filtering_is_idempotent():
+    """Running sanitize twice produces the same result."""
+    msgs = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": ""},
+        {"role": "assistant", "content": "final"},
+    ]
+    out1 = AIAgent._sanitize_api_messages(msgs)
+    out2 = AIAgent._sanitize_api_messages(out1)
+    assert out1 == out2
+
+
+def test_preserves_assistant_with_empty_content_but_with_codex_reasoning():
+    """Assistant with content=\"\" but codex_reasoning_items must be preserved for replay."""
+    msgs = [
+        {"role": "user", "content": "continue"},
+        {"role": "assistant", "content": "", "finish_reason": "incomplete",
+         "codex_reasoning_items": [{"type": "reasoning", "id": "rs_001", "encrypted_content": "enc"}]},
+    ]
+    out = AIAgent._sanitize_api_messages(msgs)
+    assert len(out) == 2
+    assert out[1]["role"] == "assistant"
+    assert out[1]["codex_reasoning_items"]
+
+
+def test_preserves_assistant_with_empty_content_but_with_reasoning_content():
+    """Assistant with content=\"\" but reasoning_content must be preserved for replay."""
+    msgs = [
+        {"role": "user", "content": "continue"},
+        {"role": "assistant", "content": "", "reasoning_content": "thinking..."},
+    ]
+    out = AIAgent._sanitize_api_messages(msgs)
+    assert len(out) == 2
+    assert out[1]["role"] == "assistant"
+    assert out[1]["reasoning_content"] == "thinking..."
 
 
 # ---------------------------------------------------------------------------

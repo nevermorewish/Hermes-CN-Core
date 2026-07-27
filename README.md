@@ -1,6 +1,6 @@
 # Hermes-CN-Core
 
-简体中文 · [English](./README.en.md)
+简体中文（兼容入口：[README.zh-CN.md](./README.zh-CN.md)） · [English](./README.en.md)
 
 [![Tests](https://github.com/Eynzof/Hermes-CN-Core/actions/workflows/tests.yml/badge.svg)](https://github.com/Eynzof/Hermes-CN-Core/actions/workflows/tests.yml)
 [![Runtime Release](https://github.com/Eynzof/Hermes-CN-Core/actions/workflows/release-runtime.yml/badge.svg)](https://github.com/Eynzof/Hermes-CN-Core/actions/workflows/release-runtime.yml)
@@ -13,7 +13,6 @@
 `Hermes-CN-Core` 是 [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) 的中文社区核心 runtime fork。这个仓库持续跟踪上游，同时维护一组小而明确的补丁，用于中文模型服务商元数据、Hermes 桌面端 runtime，以及 [hermes-agent-cn-desktop](https://github.com/Eynzof/hermes-agent-cn-desktop) 依赖的 Dashboard API。
 
 这个项目不是对 Hermes Agent 的重新实现，而是一个长期维护的下游 fork。我们保留上游归属、上游许可证和清晰的上游同步流程。Python 包仍然保持上游兼容的 `hermes` CLI 入口。
-
 <table>
 <tr><td><b>Hermes Agent 中文社区</b></td><td>通过 <a href="https://hermesagent.org.cn">hermesagent.org.cn</a> 提供中文官网、社区入口、桌面端下载与本地化说明。</td></tr>
 <tr><td><b>中文优先的核心 runtime</b></td><td>仓库首页文档现在以中文为主，英文版通过顶部语言切换访问。</td></tr>
@@ -38,7 +37,7 @@ Hermes Agent 中文社区官网是 [hermesagent.org.cn](https://hermesagent.org.
 
 ## 和上游有什么不同？
 
-所有 fork 专属改动都记录在 [FORK_NOTES.zh-CN.md](./FORK_NOTES.zh-CN.md)。简单说，这个 fork 主要维护：
+所有 fork 专属改动都记录在 [FORK_NOTES.zh-CN.md](./FORK_NOTES.zh-CN.md)；英文版记录见 [FORK_NOTES.md](./FORK_NOTES.md)。简单说，这个 fork 主要维护：
 
 - **中文模型服务商元数据**：让 Dashboard 环境变量面板识别 ARK、千帆、混元、SiliconFlow、ModelScope、AI302、CompShare、LongCat 等配置项。
 - **桌面端依赖的 Dashboard API**：包括附件上传、workspace 目录浏览、MCP server 摘要、active profile 读写等接口。
@@ -80,12 +79,11 @@ pip install "git+https://github.com/Eynzof/Hermes-CN-Core.git"
 iex (irm https://raw.githubusercontent.com/Eynzof/Hermes-CN-Core/main/scripts/install.ps1)
 ```
 
-安装器会处理 uv、Python 3.11、Node.js、ripgrep、ffmpeg，以及仓库克隆、虚拟环境和 `hermes` 命令的配置。Hermes 不再依赖 Git Bash 作为 shell——原生 Windows 直接使用 PowerShell。Git 仍用于仓库操作：如果系统里已经安装 Git，安装器会直接使用现有 Git；否则会把隔离的 PortableGit 下载到 `%LOCALAPPDATA%\hermes\git`，不需要管理员权限，也不会污染系统 Git。
+安装器会处理 uv、Python 3.14、Node.js、ripgrep、ffmpeg，以及仓库克隆、虚拟环境和 `hermes` 命令的配置。在 Windows 上，默认 shell 是 **PowerShell**（优先使用 pwsh 7.x，自动回退到 Windows PowerShell 5.1）。如果你已安装 Git for Windows，可在 config.yaml 中设置 `terminal.shell: bash` 使用 Git Bash 作为可选 shell。安装器还会安装 Microsoft Coreutils（提供 `cat`、`cp`、`mv`、`ls` 等 POSIX 命令行工具），确保跨平台脚本和技能能够正常工作。Git 仍用于仓库操作：如果系统里已经安装 Git，安装器会直接使用现有 Git；否则会把隔离的 PortableGit 下载到 `%LOCALAPPDATA%\hermes\git`，不需要管理员权限，也不会污染系统 Git。
 
 > **Android / Termux：** 已验证的手动安装路径见 [Termux guide](https://hermes-agent.nousresearch.com/docs/getting-started/termux)。在 Termux 上，Hermes 会安装裁剪后的 `.[termux]` extra，因为完整的 `.[all]` extra 目前会拉取 Android 不兼容的语音依赖。
 >
 > **Windows：** 原生 Windows 可以直接使用上面的 PowerShell 一行命令。如果你更偏好 WSL2，也可以在 WSL2 中使用 Linux 流程。原生 Windows 安装目录是 `%LOCALAPPDATA%\hermes`，WSL2 与 Linux 一样使用 `~/.hermes`。
-
 安装完成后启动：
 
 ```bash
@@ -160,8 +158,7 @@ pip install -e ".[all,dev]"
 如果你使用 `uv`，也可以这样安装：
 
 ```bash
-uv venv --python 3.11
-source .venv/bin/activate
+uv venv --python 3.14source .venv/bin/activate
 uv pip install -e ".[all,dev]"
 ```
 

@@ -1,6 +1,6 @@
 """Tests for OSV malware check on MCP extension packages."""
 
-import json
+import orjson
 import pytest
 from unittest.mock import patch, MagicMock
 
@@ -83,12 +83,43 @@ class TestParsePackageFromArgs:
     def test_only_flags(self):
         assert _parse_package_from_args(["-y", "--yes"], "npm") == (None, None)
 
+    def test_package_equals_form(self):
+        # `npx --package=@scope/pkg@1.0 some-bin` -> install target is the
+        # --package value, NOT the executed binary `some-bin`.
+        name, ver = _parse_package_from_args(
+            ["--package=@scope/pkg@1.0", "some-bin"], "npm"
+        )
+        assert name == "@scope/pkg"
+        assert ver == "1.0"
+
+    def test_package_space_form(self):
+        # `npx --package @scope/pkg some-bin` (value in the next token).
+        name, ver = _parse_package_from_args(
+            ["--package", "@scope/pkg@2.0", "some-bin"], "npm"
+        )
+        assert name == "@scope/pkg"
+        assert ver == "2.0"
+
+    def test_short_p_form(self):
+        # `npx -p left-pad@1.3.0 cli-cmd` -> package is left-pad, not cli-cmd.
+        name, ver = _parse_package_from_args(
+            ["-p", "left-pad@1.3.0", "cli-cmd"], "npm"
+        )
+        assert name == "left-pad"
+        assert ver == "1.3.0"
+
+    def test_plain_positional_still_works(self):
+        # Regression guard: bare positional with no --package flag is the pkg.
+        name, ver = _parse_package_from_args(["-y", "react@18.3.1"], "npm")
+        assert name == "react"
+        assert ver == "18.3.1"
+
 
 class TestCheckPackageForMalware:
     def test_clean_package(self):
         """Clean package returns None (allow)."""
         mock_response = MagicMock()
-        mock_response.read.return_value = json.dumps({"vulns": []}).encode()
+        mock_response.read.return_value = orjson.dumps({"vulns": []})
         mock_response.__enter__ = lambda s: s
         mock_response.__exit__ = MagicMock(return_value=False)
 
@@ -99,12 +130,12 @@ class TestCheckPackageForMalware:
     def test_malware_blocked(self):
         """Known malware package returns error string."""
         mock_response = MagicMock()
-        mock_response.read.return_value = json.dumps({
+        mock_response.read.return_value = orjson.dumps({
             "vulns": [
                 {"id": "MAL-2023-7938", "summary": "Malicious code in evil-pkg"},
                 {"id": "CVE-2023-1234", "summary": "Regular vulnerability"},  # should be filtered
             ]
-        }).encode()
+        })
         mock_response.__enter__ = lambda s: s
         mock_response.__exit__ = MagicMock(return_value=False)
 
@@ -129,14 +160,14 @@ class TestCheckPackageForMalware:
     def test_uvx_pypi(self):
         """uvx commands check PyPI ecosystem."""
         mock_response = MagicMock()
-        mock_response.read.return_value = json.dumps({"vulns": []}).encode()
+        mock_response.read.return_value = orjson.dumps({"vulns": []})
         mock_response.__enter__ = lambda s: s
         mock_response.__exit__ = MagicMock(return_value=False)
 
         with patch("tools.osv_check.urllib.request.urlopen", return_value=mock_response) as mock_url:
             check_package_for_malware("uvx", ["mcp-server-fetch"])
             # Verify PyPI ecosystem was sent
-            call_data = json.loads(mock_url.call_args[0][0].data)
+            call_data = orjson.loads(mock_url.call_args[0][0].data)
             assert call_data["package"]["ecosystem"] == "PyPI"
             assert call_data["package"]["name"] == "mcp-server-fetch"
 

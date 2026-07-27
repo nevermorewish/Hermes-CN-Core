@@ -25,6 +25,7 @@ Covered:
 
 from __future__ import annotations
 
+import orjson
 import json
 from typing import cast
 from unittest.mock import MagicMock
@@ -193,7 +194,7 @@ class TestRuntimeDictSerializationGuard:
         either raise on plain ``json.dumps`` (good — fail loud) or be
         sanitized BEFORE serialization. This test pins the loud-fail
         behaviour so future changes that introduce
-        ``json.dumps(..., default=str)`` over a runtime dict are caught
+        ``orjson.dumps(..., default=str).decode('utf-8')`` over a runtime dict are caught
         by a regression here."""
 
         def provider():
@@ -207,7 +208,7 @@ class TestRuntimeDictSerializationGuard:
         # Plain json.dumps — must raise, not silently produce
         # ``"<function provider at 0x...>"``.
         with pytest.raises(TypeError):
-            json.dumps(runtime)
+            orjson.dumps(runtime).decode('utf-8')
 
 
 # ---------------------------------------------------------------------------
@@ -275,12 +276,15 @@ class TestCliEnsureRuntimeCredentialsCallable:
 
     def test_callable_predicate_present_in_cli_runtime_validation(self):
         from pathlib import Path
+        # ``_ensure_runtime_credentials`` was extracted from cli.py into the
+        # ``CLIAgentSetupMixin`` (god-file decomposition Phase 4). Read the
+        # module the method actually lives in now.
         src = (Path(__file__).resolve().parent.parent.parent
-               / "cli.py").read_text()
+               / "hermes_cli" / "cli_agent_setup_mixin.py").read_text()
         # The fix introduces ``_is_callable_provider`` which gates the
         # string-only check so callable token providers survive.
         assert "_is_callable_provider = callable(api_key)" in src, (
-            "cli.py:_ensure_runtime_credentials must preserve a callable "
+            "_ensure_runtime_credentials must preserve a callable "
             "api_key (Entra ID bearer provider). Without the guard, the "
             "callable is stringified to 'no-key-required' and Azure 401s."
         )

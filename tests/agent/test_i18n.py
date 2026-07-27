@@ -14,7 +14,7 @@ LOCALES_DIR = Path(__file__).resolve().parents[2] / "locales"
 
 
 def _load_raw(lang: str) -> dict:
-    with (LOCALES_DIR / f"{lang}.yaml").open("r", encoding="utf-8") as f:
+    with (LOCALES_DIR / f"{lang}.yaml").open("r", encoding="utf-8", errors="replace") as f:
         return yaml.safe_load(f)
 
 
@@ -60,7 +60,7 @@ def test_catalog_placeholders_match_english(lang: str):
     would either raise KeyError at runtime or silently drop the interpolated
     value.  Pin parity at the test layer.
     """
-    import re
+    from agent.re_compat import re
     placeholder_re = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
     en_flat = _flatten(_load_raw("en"))
     lang_flat = _flatten(_load_raw(lang))

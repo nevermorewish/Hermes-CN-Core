@@ -7,11 +7,16 @@ Tests cover:
 - Path resolution (absolute, relative to HERMES_HOME/scripts/)
 """
 
+import sys
+import pytest
+import orjson
 import json
 import os
 import sys
 import textwrap
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -86,6 +91,19 @@ class TestJobScriptField:
         assert updated.get("script") is None
 
 
+def test_cronjob_tool_rejects_stale_past_one_shot(cron_env, monkeypatch):
+    from tools.cronjob_tools import cronjob
+
+    now = datetime(2026, 3, 18, 4, 30, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr("cron.jobs._hermes_now", lambda: now)
+    stale = (now - timedelta(minutes=5)).isoformat()
+
+    result = json.loads(cronjob(action="create", prompt="Too late", schedule=stale))
+
+    assert result["success"] is False
+    assert "past and cannot be scheduled" in result["error"]
+
+
 class TestRunJobScript:
     """Test the _run_job_script() function."""
 
@@ -132,6 +150,136 @@ class TestRunJobScript:
         assert "exited with code 1" in output
         assert "error info" in output
 
+    def test_script_subprocess_env_sanitized(self, cron_env, monkeypatch):
+        """Cron scripts must not inherit Hermes provider env (SECURITY.md §2.3)."""
+        from tools.environments.local import _HERMES_PROVIDER_ENV_BLOCKLIST
+        from cron.scheduler import _run_job_script
+
+        # sorted() so the probed var is deterministic across runs
+        # (frozenset iteration order varies with PYTHONHASHSEED).
+        blocked_var = sorted(_HERMES_PROVIDER_ENV_BLOCKLIST)[0]
+        monkeypatch.setenv(blocked_var, "must_not_leak")
+
+        script = cron_env / "scripts" / "env_probe.py"
+        script.write_text(
+            textwrap.dedent(
+                f"""\
+                import os
+                key = {blocked_var!r}
+                print("PRESENT" if os.environ.get(key) else "ABSENT")
+                """
+            )
+        )
+
+        success, output = _run_job_script("env_probe.py")
+        assert success is True
+        assert output == "ABSENT"
+
+    def test_windows_uv_venv_python_script_bypasses_launcher(self, cron_env, tmp_path, monkeypatch):
+        from cron import scheduler as sched_mod
+        from cron.scheduler import _run_job_script
+
+        script = cron_env / "scripts" / "probe.py"
+        script.write_text('print("ok")\n')
+
+        venv = tmp_path / "venv"
+        venv_scripts = venv / "Scripts"
+        site_packages = venv / "Lib" / "site-packages"
+        base = tmp_path / "base"
+        venv_scripts.mkdir(parents=True)
+        site_packages.mkdir(parents=True)
+        base.mkdir()
+        venv_python = venv_scripts / "python.exe"
+        base_python = base / "python.exe"
+        venv_python.write_text("", encoding="utf-8")
+        base_python.write_text("", encoding="utf-8")
+        (venv / "pyvenv.cfg").write_text(f"home = {base}\nuv = true\n", encoding="utf-8")
+
+        captured = {}
+
+        def fake_run(argv, **kwargs):
+            captured["argv"] = argv
+            captured["kwargs"] = kwargs
+            return SimpleNamespace(returncode=0, stdout="ok\n", stderr="")
+
+        monkeypatch.setattr(sched_mod.sys, "platform", "win32")
+        monkeypatch.setattr(sched_mod.sys, "executable", str(venv_python))
+        monkeypatch.setattr(sched_mod, "windows_hide_flags", lambda: 0x08000000)
+        monkeypatch.setattr(sched_mod.subprocess, "run", fake_run)
+
+        success, output = _run_job_script("probe.py")
+
+        assert success is True
+        assert output == "ok"
+        assert captured["argv"] == [str(base_python), str(script.resolve())]
+        assert captured["kwargs"]["creationflags"] == 0x08000000
+        env = captured["kwargs"]["env"]
+        assert env["VIRTUAL_ENV"] == str(venv)
+        assert str(site_packages) in env["PYTHONPATH"]
+
+    def test_windows_pythonw_script_uses_sibling_python_for_captured_output(self, cron_env, tmp_path, monkeypatch):
+        from cron import scheduler as sched_mod
+        from cron.scheduler import _run_job_script
+
+        script = cron_env / "scripts" / "probe.py"
+        script.write_text('print("ok")\n')
+
+        venv = tmp_path / "venv"
+        venv_scripts = venv / "Scripts"
+        venv_scripts.mkdir(parents=True)
+        pythonw = venv_scripts / "pythonw.exe"
+        python = venv_scripts / "python.exe"
+        pythonw.write_text("", encoding="utf-8")
+        python.write_text("", encoding="utf-8")
+
+        captured = {}
+
+        def fake_run(argv, **kwargs):
+            captured["argv"] = argv
+            captured["kwargs"] = kwargs
+            return SimpleNamespace(returncode=0, stdout="ok\n", stderr="")
+
+        monkeypatch.setattr(sched_mod.sys, "platform", "win32")
+        monkeypatch.setattr(sched_mod.sys, "executable", str(pythonw))
+        monkeypatch.setattr(sched_mod, "windows_hide_flags", lambda: 0x08000000)
+        monkeypatch.setattr(sched_mod.subprocess, "run", fake_run)
+
+        success, output = _run_job_script("probe.py")
+
+        assert success is True
+        assert output == "ok"
+        assert captured["argv"] == [str(python), str(script.resolve())]
+        assert captured["kwargs"]["encoding"] == "utf-8"
+        assert captured["kwargs"]["errors"] == "replace"
+
+    @pytest.mark.skipif(sys.platform == 'win32', reason="Windows baseline: encoding is always set on Windows")
+    def test_non_windows_script_pins_text_decoding(self, cron_env, monkeypatch):
+        from cron import scheduler as sched_mod
+        from cron.scheduler import _run_job_script
+
+        script = cron_env / "scripts" / "probe.py"
+        script.write_text('print("ok")\n')
+
+        captured = {}
+
+        def fake_run(argv, **kwargs):
+            captured["argv"] = argv
+            captured["kwargs"] = kwargs
+            return SimpleNamespace(returncode=0, stdout="ok\n", stderr="")
+
+        monkeypatch.setattr(sched_mod.sys, "platform", "linux")
+        monkeypatch.setattr(sched_mod.subprocess, "run", fake_run)
+
+        success, output = _run_job_script("probe.py")
+
+        assert success is True
+        assert output == "ok"
+        assert captured["argv"] == [sys.executable, str(script.resolve())]
+        assert captured["kwargs"]["text"] is True
+        assert "creationflags" not in captured["kwargs"]
+        assert captured["kwargs"]["encoding"] == "utf-8"
+        assert captured["kwargs"]["errors"] == "replace"
+
     def test_script_empty_output(self, cron_env):
         from cron.scheduler import _run_job_script
 
@@ -169,7 +317,7 @@ class TestRunJobScript:
 
         success, output = _run_job_script(str(script))
         assert success is True
-        parsed = json.loads(output)
+        parsed = orjson.loads(output)
         assert parsed["new_prs"][0]["number"] == 42
 
 
@@ -220,7 +368,7 @@ class TestCronjobToolScript:
         monkeypatch.setenv("HERMES_INTERACTIVE", "1")
         from tools.cronjob_tools import cronjob
 
-        result = json.loads(cronjob(
+        result = orjson.loads(cronjob(
             action="create",
             schedule="every 1h",
             prompt="Monitor things",
@@ -233,14 +381,14 @@ class TestCronjobToolScript:
         monkeypatch.setenv("HERMES_INTERACTIVE", "1")
         from tools.cronjob_tools import cronjob
 
-        create_result = json.loads(cronjob(
+        create_result = orjson.loads(cronjob(
             action="create",
             schedule="every 1h",
             prompt="Monitor things",
         ))
         job_id = create_result["job_id"]
 
-        update_result = json.loads(cronjob(
+        update_result = orjson.loads(cronjob(
             action="update",
             job_id=job_id,
             script="new_script.py",
@@ -252,7 +400,7 @@ class TestCronjobToolScript:
         monkeypatch.setenv("HERMES_INTERACTIVE", "1")
         from tools.cronjob_tools import cronjob
 
-        create_result = json.loads(cronjob(
+        create_result = orjson.loads(cronjob(
             action="create",
             schedule="every 1h",
             prompt="Monitor things",
@@ -260,7 +408,7 @@ class TestCronjobToolScript:
         ))
         job_id = create_result["job_id"]
 
-        update_result = json.loads(cronjob(
+        update_result = orjson.loads(cronjob(
             action="update",
             job_id=job_id,
             script="",
@@ -279,7 +427,7 @@ class TestCronjobToolScript:
             script="data_collector.py",
         )
 
-        list_result = json.loads(cronjob(action="list"))
+        list_result = orjson.loads(cronjob(action="list"))
         assert list_result["success"] is True
         assert len(list_result["jobs"]) == 1
         assert list_result["jobs"][0]["script"] == "data_collector.py"
@@ -400,7 +548,7 @@ class TestCronjobToolScriptValidation:
         monkeypatch.setenv("HERMES_INTERACTIVE", "1")
         from tools.cronjob_tools import cronjob
 
-        result = json.loads(cronjob(
+        result = orjson.loads(cronjob(
             action="create",
             schedule="every 1h",
             prompt="Monitor things",
@@ -413,7 +561,7 @@ class TestCronjobToolScriptValidation:
         monkeypatch.setenv("HERMES_INTERACTIVE", "1")
         from tools.cronjob_tools import cronjob
 
-        result = json.loads(cronjob(
+        result = orjson.loads(cronjob(
             action="create",
             schedule="every 1h",
             prompt="Monitor things",
@@ -426,7 +574,7 @@ class TestCronjobToolScriptValidation:
         monkeypatch.setenv("HERMES_INTERACTIVE", "1")
         from tools.cronjob_tools import cronjob
 
-        result = json.loads(cronjob(
+        result = orjson.loads(cronjob(
             action="create",
             schedule="every 1h",
             prompt="Monitor things",
@@ -439,7 +587,7 @@ class TestCronjobToolScriptValidation:
         monkeypatch.setenv("HERMES_INTERACTIVE", "1")
         from tools.cronjob_tools import cronjob
 
-        result = json.loads(cronjob(
+        result = orjson.loads(cronjob(
             action="create",
             schedule="every 1h",
             prompt="Monitor things",
@@ -452,14 +600,14 @@ class TestCronjobToolScriptValidation:
         monkeypatch.setenv("HERMES_INTERACTIVE", "1")
         from tools.cronjob_tools import cronjob
 
-        create_result = json.loads(cronjob(
+        create_result = orjson.loads(cronjob(
             action="create",
             schedule="every 1h",
             prompt="Monitor things",
         ))
         job_id = create_result["job_id"]
 
-        update_result = json.loads(cronjob(
+        update_result = orjson.loads(cronjob(
             action="update",
             job_id=job_id,
             script="/tmp/evil.py",
@@ -472,7 +620,7 @@ class TestCronjobToolScriptValidation:
         monkeypatch.setenv("HERMES_INTERACTIVE", "1")
         from tools.cronjob_tools import cronjob
 
-        create_result = json.loads(cronjob(
+        create_result = orjson.loads(cronjob(
             action="create",
             schedule="every 1h",
             prompt="Monitor things",
@@ -480,7 +628,7 @@ class TestCronjobToolScriptValidation:
         ))
         job_id = create_result["job_id"]
 
-        update_result = json.loads(cronjob(
+        update_result = orjson.loads(cronjob(
             action="update",
             job_id=job_id,
             script="",
@@ -492,7 +640,7 @@ class TestCronjobToolScriptValidation:
         monkeypatch.setenv("HERMES_INTERACTIVE", "1")
         from tools.cronjob_tools import cronjob
 
-        result = json.loads(cronjob(
+        result = orjson.loads(cronjob(
             action="create",
             schedule="every 1h",
             prompt="Monitor things",

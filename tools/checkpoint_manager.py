@@ -48,17 +48,20 @@ reclaim object storage.  A size-cap pass drops the oldest checkpoints per
 project until total store size is under ``max_total_size_mb``.
 """
 
-import hashlib
-import json
+import xxhash
+import orjson
 import logging
 import os
-import re
+from agent.re_compat import re
 import shutil
 import subprocess
 import time
 from pathlib import Path
 from hermes_constants import get_hermes_home
+from hermes_cli._subprocess_compat import windows_hide_flags
 from typing import Dict, List, Optional, Set, Tuple
+
+from utils import env_int
 
 logger = logging.getLogger(__name__)
 
@@ -139,7 +142,7 @@ DEFAULT_EXCLUDES = [
 ]
 
 # Git subprocess timeout (seconds).
-_GIT_TIMEOUT: int = max(10, min(60, int(os.getenv("HERMES_CHECKPOINT_TIMEOUT", "30"))))
+_GIT_TIMEOUT: int = max(10, min(60, env_int("HERMES_CHECKPOINT_TIMEOUT", 30)))
 
 # Max files to snapshot — skip huge directories to avoid slowdowns.
 _MAX_FILES = 50_000
@@ -198,7 +201,7 @@ def _normalize_path(path_value: str) -> Path:
 def _project_hash(working_dir: str) -> str:
     """Deterministic per-project hash: sha256(abs_path)[:16]."""
     abs_path = str(_normalize_path(working_dir))
-    return hashlib.sha256(abs_path.encode()).hexdigest()[:16]
+    return xxhash.xxh64(abs_path.encode()).hexdigest()[:16]
 
 
 def _store_path(base: Optional[Path] = None) -> Path:
@@ -270,6 +273,28 @@ def _git_env(
     return env
 
 
+def _repair_bare_repo_dirs(store: Path) -> None:
+    """Recreate refs/ and branches/ dirs that ``git gc`` may have removed.
+
+    ``git gc --prune=now`` on a bare repo with only packed refs can remove
+    the empty ``refs/heads/`` directory.  Git 2.34+ requires ``refs/`` (and
+    some versions require ``branches/``) to exist even when all refs are
+    packed in ``packed-refs``.  Without them, ``git add -A`` returns
+    ``fatal: not a git repository`` and all checkpoint operations fail
+    silently.
+    """
+    for subdir in ("refs/heads", "branches"):
+        path = store / subdir
+        if not path.exists():
+            try:
+                path.mkdir(parents=True, exist_ok=True)
+                logger.debug("Repaired missing %s in checkpoint store", subdir)
+            except OSError as exc:
+                logger.warning(
+                    "Cannot create %s in checkpoint store: %s", subdir, exc,
+                )
+
+
 def _run_git(
     args: List[str],
     store: Path,
@@ -297,14 +322,20 @@ def _run_git(
     env = _git_env(store, str(normalized_working_dir), index_file=index_file)
     cmd = ["git"] + list(args)
     allowed_returncodes = allowed_returncodes or set()
+
     try:
         result = subprocess.run(
             cmd,
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             timeout=timeout,
             env=env,
             cwd=str(normalized_working_dir),
+            stdin=subprocess.DEVNULL,
+            # Checkpoints fire several bare git calls per turn from the
+            # console-less desktop/gateway backend; suppress the per-call
+            # conhost flash on Windows (no-op on POSIX).
+            creationflags=windows_hide_flags(),
         )
         ok = result.returncode == 0
         stdout = result.stdout.strip()
@@ -422,8 +453,10 @@ def _init_store(store: Path, working_dir: str) -> Optional[str]:
     try:
         result = subprocess.run(
             ["git", "init", "--bare", str(store)],
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
             env=init_env, timeout=_GIT_TIMEOUT,
+            stdin=subprocess.DEVNULL,
+            creationflags=windows_hide_flags(),
         )
         if result.returncode != 0:
             return f"Shadow store init failed: {result.stderr.strip()}"
@@ -459,14 +492,14 @@ def _register_project(store: Path, working_dir: str) -> None:
                   "created_at": now, "last_touch": now}
     if meta_path.exists():
         try:
-            existing = json.loads(meta_path.read_text(encoding="utf-8"))
+            existing = orjson.loads(meta_path.read_text(encoding="utf-8", errors="replace"))
             if isinstance(existing, dict):
                 meta["created_at"] = existing.get("created_at", now)
         except (OSError, ValueError):
             pass
     try:
         meta_path.parent.mkdir(parents=True, exist_ok=True)
-        meta_path.write_text(json.dumps(meta), encoding="utf-8")
+        meta_path.write_text(orjson.dumps(meta).decode('utf-8'), encoding="utf-8")
     except OSError as exc:
         logger.debug("Could not write project metadata %s: %s", meta_path, exc)
 
@@ -479,7 +512,7 @@ def _touch_project(store: Path, working_dir: str) -> None:
         _register_project(store, working_dir)
         return
     try:
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        meta = orjson.loads(meta_path.read_text(encoding="utf-8", errors="replace"))
     except (OSError, ValueError):
         meta = {}
     if not isinstance(meta, dict):
@@ -488,7 +521,7 @@ def _touch_project(store: Path, working_dir: str) -> None:
     meta["last_touch"] = time.time()
     meta.setdefault("created_at", meta["last_touch"])
     try:
-        meta_path.write_text(json.dumps(meta), encoding="utf-8")
+        meta_path.write_text(orjson.dumps(meta).decode('utf-8'), encoding="utf-8")
     except OSError as exc:
         logger.debug("Could not update project metadata %s: %s", meta_path, exc)
 
@@ -502,7 +535,7 @@ def _list_projects(store: Path) -> List[Dict]:
     for meta_path in projects_dir.glob("*.json"):
         dir_hash = meta_path.stem
         try:
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            meta = orjson.loads(meta_path.read_text(encoding="utf-8", errors="replace"))
         except (OSError, ValueError):
             continue
         if not isinstance(meta, dict):
@@ -664,7 +697,7 @@ class CheckpointManager:
 
         ref = _ref_name(_project_hash(abs_dir))
         ok, stdout, _ = _run_git(
-            ["log", ref, f"--format=%H|%h|%aI|%s", "-n", str(self.max_snapshots)],
+            ["log", ref, "--format=%H|%h|%aI|%s", "-n", str(self.max_snapshots)],
             store, abs_dir,
             allowed_returncodes={128, 129},
         )
@@ -1082,6 +1115,7 @@ class CheckpointManager:
             ["gc", "--prune=now", "--quiet"],
             store, working_dir, timeout=_GIT_TIMEOUT * 3,
         )
+        _repair_bare_repo_dirs(store)
 
     def _enforce_size_cap(self, store: Path) -> None:
         """If total store size exceeds ``max_total_size_mb``, drop oldest
@@ -1169,6 +1203,7 @@ class CheckpointManager:
             ["gc", "--prune=now", "--quiet"],
             store, str(store.parent), timeout=_GIT_TIMEOUT * 3,
         )
+        _repair_bare_repo_dirs(store)
 
 
 def format_checkpoint_list(checkpoints: List[Dict], directory: str) -> str:
@@ -1301,7 +1336,7 @@ def prune_checkpoints(
             wd_marker = child / "HERMES_WORKDIR"
             if wd_marker.exists():
                 try:
-                    workdir = wd_marker.read_text(encoding="utf-8").strip()
+                    workdir = wd_marker.read_text(encoding="utf-8", errors="replace").strip()
                 except (OSError, UnicodeDecodeError):
                     workdir = None
             if workdir is None or not Path(workdir).exists():
@@ -1380,6 +1415,7 @@ def prune_checkpoints(
             ["gc", "--prune=now", "--quiet"],
             store, str(base), timeout=_GIT_TIMEOUT * 3,
         )
+        _repair_bare_repo_dirs(store)
 
         # Size-cap pass across remaining projects.
         if max_total_size_mb > 0:
@@ -1451,6 +1487,7 @@ def prune_checkpoints(
                 ["gc", "--prune=now", "--quiet"],
                 store, str(base), timeout=_GIT_TIMEOUT * 3,
             )
+            _repair_bare_repo_dirs(store)
 
     size_after = _dir_size_bytes(base)
     delta = size_before - size_after
@@ -1489,7 +1526,7 @@ def maybe_auto_prune_checkpoints(
         now = time.time()
         if marker.exists():
             try:
-                last_ts = float(marker.read_text(encoding="utf-8").strip())
+                last_ts = float(marker.read_text(encoding="utf-8", errors="replace").strip())
                 if now - last_ts < min_interval_hours * 3600:
                     out["skipped"] = True
                     return out

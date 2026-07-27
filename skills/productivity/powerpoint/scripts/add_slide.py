@@ -17,8 +17,7 @@ To see available layouts: ls unpacked/ppt/slideLayouts/
 
 Prints the <p:sldId> element to add to presentation.xml.
 """
-
-import re
+from agent.re_compat import re
 import shutil
 import sys
 from pathlib import Path
@@ -109,7 +108,7 @@ def duplicate_slide(unpacked_dir: Path, source: str) -> None:
     if source_rels.exists():
         shutil.copy2(source_rels, dest_rels)
 
-        rels_content = dest_rels.read_text(encoding="utf-8")
+        rels_content = dest_rels.read_text(encoding="utf-8", errors="replace")
         rels_content = re.sub(
             r'\s*<Relationship[^>]*Type="[^"]*notesSlide"[^>]*/>\s*',
             "\n",
@@ -129,7 +128,7 @@ def duplicate_slide(unpacked_dir: Path, source: str) -> None:
 
 def _add_to_content_types(unpacked_dir: Path, dest: str) -> None:
     content_types_path = unpacked_dir / "[Content_Types].xml"
-    content_types = content_types_path.read_text(encoding="utf-8")
+    content_types = content_types_path.read_text(encoding="utf-8", errors="replace")
 
     new_override = f'<Override PartName="/ppt/slides/{dest}" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>'
 
@@ -140,7 +139,7 @@ def _add_to_content_types(unpacked_dir: Path, dest: str) -> None:
 
 def _add_to_presentation_rels(unpacked_dir: Path, dest: str) -> str:
     pres_rels_path = unpacked_dir / "ppt" / "_rels" / "presentation.xml.rels"
-    pres_rels = pres_rels_path.read_text(encoding="utf-8")
+    pres_rels = pres_rels_path.read_text(encoding="utf-8", errors="replace")
 
     rids = [int(m) for m in re.findall(r'Id="rId(\d+)"', pres_rels)]
     next_rid = max(rids) + 1 if rids else 1
@@ -157,7 +156,7 @@ def _add_to_presentation_rels(unpacked_dir: Path, dest: str) -> str:
 
 def _get_next_slide_id(unpacked_dir: Path) -> int:
     pres_path = unpacked_dir / "ppt" / "presentation.xml"
-    pres_content = pres_path.read_text(encoding="utf-8")
+    pres_content = pres_path.read_text(encoding="utf-8", errors="replace")
     slide_ids = [int(m) for m in re.findall(r'<p:sldId[^>]*id="(\d+)"', pres_content)]
     return max(slide_ids) + 1 if slide_ids else 256
 

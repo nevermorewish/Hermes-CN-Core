@@ -1,4 +1,4 @@
-import json
+import orjson
 from unittest.mock import patch
 
 from hermes_cli.codex_models import DEFAULT_CODEX_MODELS, get_codex_model_ids
@@ -9,8 +9,7 @@ def test_get_codex_model_ids_prioritizes_default_and_cache(tmp_path, monkeypatch
     codex_home.mkdir(parents=True, exist_ok=True)
     (codex_home / "config.toml").write_text('model = "gpt-5.2-codex"\n')
     (codex_home / "models_cache.json").write_text(
-        json.dumps(
-            {
+        orjson.dumps({
                 "models": [
                     {"slug": "gpt-5.3-codex", "priority": 20, "supported_in_api": True},
                     {"slug": "gpt-5.3-codex-spark", "priority": 6, "supported_in_api": False},
@@ -18,8 +17,7 @@ def test_get_codex_model_ids_prioritizes_default_and_cache(tmp_path, monkeypatch
                     {"slug": "gpt-5.4", "priority": 1, "supported_in_api": True},
                     {"slug": "gpt-5-hidden-codex", "priority": 2, "visibility": "hidden"},
                 ]
-            }
-        )
+            }).decode('utf-8')
     )
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
 
@@ -133,7 +131,7 @@ def test_model_command_uses_runtime_access_token_for_codex_list(monkeypatch):
         captured["access_token"] = access_token
         return ["gpt-5.2-codex", "gpt-5.2"]
 
-    def _fake_prompt_model_selection(model_ids, current_model=""):
+    def _fake_prompt_model_selection(model_ids, current_model="", **_kwargs):
         captured["model_ids"] = list(model_ids)
         captured["current_model"] = current_model
         return None
@@ -181,7 +179,7 @@ def test_model_command_prompts_to_reuse_or_reauthenticate_codex_session(monkeypa
     )
     monkeypatch.setattr(
         "hermes_cli.auth._prompt_model_selection",
-        lambda model_ids, current_model="": None,
+        lambda model_ids, current_model="", **_kwargs: None,
     )
 
     _model_flow_openai_codex({}, current_model="gpt-5.4")
@@ -219,7 +217,7 @@ def test_model_command_uses_existing_codex_session_without_relogin(monkeypatch):
     )
     monkeypatch.setattr(
         "hermes_cli.auth._prompt_model_selection",
-        lambda model_ids, current_model="": None,
+        lambda model_ids, current_model="", **_kwargs: None,
     )
     monkeypatch.setattr(
         "hermes_cli.auth._login_openai_codex",

@@ -1,10 +1,65 @@
 """Tests for tools/file_operations.py — deny list, result dataclasses, helpers."""
 
 import os
+from agent.re_compat import re
+import sys
 import pytest
+import ripgrepy
 import subprocess
+import tools.file_operations
 from pathlib import Path
 from unittest.mock import MagicMock
+
+
+class FakeRipgrepy:
+    """Drop-in replacement for ripgrepy.Ripgrepy that skips binary probing."""
+
+    def __init__(self, regex_pattern, path, rg_path="rg"):
+        self.regex_pattern = regex_pattern
+        self.path = path
+        self.command = [rg_path or "rg"]
+
+    def files(self):
+        self.command.append("--files")
+        return self
+
+    def glob(self, pattern):
+        self.command.extend(["--glob", pattern])
+        return self
+
+    def sortr(self, value):
+        self.command.append(f"--sortr={value}")
+        return self
+
+    def line_number(self):
+        self.command.append("--line-number")
+        return self
+
+    def no_heading(self):
+        self.command.append("--no-heading")
+        return self
+
+    def with_filename(self):
+        self.command.append("--with-filename")
+        return self
+
+    def context(self, n):
+        self.command.extend(["--context", str(n)])
+        return self
+
+    def files_with_matches(self):
+        self.command.append("--files-with-matches")
+        return self
+
+    def count_matches(self):
+        self.command.append("--count-matches")
+        return self
+
+
+@pytest.fixture
+def fake_ripgrepy(monkeypatch):
+    monkeypatch.setattr(ripgrepy, "Ripgrepy", FakeRipgrepy)
+
 
 from tools.file_operations import (
     _is_write_denied,
@@ -14,6 +69,7 @@ from tools.file_operations import (
     SearchResult,
     SearchMatch,
     LintResult,
+    ExecuteResult,
     ShellFileOperations,
     MAX_LINE_LENGTH,
     normalize_read_pagination,
@@ -38,6 +94,11 @@ class TestIsWriteDenied:
         path = os.path.join(str(Path.home()), ".netrc")
         assert _is_write_denied(path) is True
 
+    @pytest.mark.parametrize("name", [".pgpass", ".npmrc", ".pypirc"])
+    def test_credential_config_files_denied(self, name):
+        path = os.path.join(str(Path.home()), name)
+        assert _is_write_denied(path) is True
+
     def test_aws_prefix_denied(self):
         path = os.path.join(str(Path.home()), ".aws", "credentials")
         assert _is_write_denied(path) is True
@@ -59,9 +120,6 @@ class TestIsWriteDenied:
     @pytest.mark.parametrize(
         "path",
         [
-            "auth.json",
-            "config.yaml",
-            "webhook_subscriptions.json",
             ".anthropic_oauth.json",
             "mcp-tokens/token1.json",
             "mcp-tokens/subdir/token2.json",
@@ -71,8 +129,8 @@ class TestIsWriteDenied:
             "pairing",
         ],
     )
-    def test_hermes_control_files_oauth_and_mcp_tokens_denied(self, path):
-        """Hermes control files, PKCE creds, mcp-tokens, and pairing entries must be write-denied."""
+    def test_oauth_mcp_tokens_and_pairing_denied(self, path):
+        """PKCE creds, mcp-tokens, and pairing entries must be write-denied."""
         from hermes_constants import get_hermes_home
         hermes_home = get_hermes_home()
         full_path = str(hermes_home / path)
@@ -80,15 +138,21 @@ class TestIsWriteDenied:
 
     @pytest.mark.parametrize(
         "path",
+        ["auth.json", "config.yaml", "webhook_subscriptions.json"],
+    )
+    def test_hermes_control_files_requested_writable(self, path):
+        from hermes_constants import get_hermes_home
+
+        assert _is_write_denied(str(get_hermes_home() / path)) is False
+
+    @pytest.mark.parametrize(
+        "path",
         [
-            "dummy/../config.yaml",
-            "./auth.json",
             "./.anthropic_oauth.json",
-            "mcp-tokens/../config.yaml",
         ],
     )
-    def test_hermes_control_files_and_oauth_traversal_denied(self, path):
-        """Path traversal attempts to protected Hermes files must be blocked."""
+    def test_oauth_traversal_denied(self, path):
+        """Path traversal attempts to protected OAuth files must be blocked."""
         from hermes_constants import get_hermes_home
         hermes_home = get_hermes_home()
         full_path = str(hermes_home / path)
@@ -106,30 +170,29 @@ class TestIsWriteDenied:
         """Unrelated paths must still be allowed."""
         assert _is_write_denied(path) is False
 
-    @pytest.mark.parametrize(
-        "name",
-        ["auth.json", "config.yaml", "webhook_subscriptions.json", ".anthropic_oauth.json"],
-    )
-    def test_control_files_and_oauth_protected_in_profile_mode(self, tmp_path, monkeypatch, name):
-        """Under a profile, BOTH <profile>/X and <root>/X must be denied (#15981 shape).
-
-        Without the root-level pass, a profile-mode session leaves the
-        global ~/.hermes/{auth.json,config.yaml,webhook_subscriptions.json,
-        .anthropic_oauth.json} writable — the same gap PR #15981 fixed
-        for .env.
-        """
-        # Simulate a profile-mode HERMES_HOME layout:
-        #   <root>/profiles/coder/{auth.json,config.yaml,...}
-        #   <root>/{auth.json,config.yaml,...}        ← must also be denied
+    @pytest.mark.parametrize("name", [".anthropic_oauth.json"])
+    def test_oauth_protected_in_profile_mode(self, tmp_path, monkeypatch, name):
+        """Under a profile, BOTH <profile>/X and <root>/X must be denied."""
         root = tmp_path / "hermes"
         profile = root / "profiles" / "coder"
         profile.mkdir(parents=True)
         monkeypatch.setenv("HERMES_HOME", str(profile))
 
-        # Profile copy
         assert _is_write_denied(str(profile / name)) is True
-        # Root copy — the gap this widening closes
         assert _is_write_denied(str(root / name)) is True
+
+    @pytest.mark.parametrize(
+        "name",
+        ["auth.json", "config.yaml", "webhook_subscriptions.json"],
+    )
+    def test_control_files_requested_writable_in_profile_mode(self, tmp_path, monkeypatch, name):
+        root = tmp_path / "hermes"
+        profile = root / "profiles" / "coder"
+        profile.mkdir(parents=True)
+        monkeypatch.setenv("HERMES_HOME", str(profile))
+
+        assert _is_write_denied(str(profile / name)) is False
+        assert _is_write_denied(str(root / name)) is False
 
     def test_mcp_tokens_dir_protected_in_profile_mode(self, tmp_path, monkeypatch):
         """mcp-tokens/ under profile AND under root must both be denied."""
@@ -263,6 +326,144 @@ class TestSearchResult:
         assert d["truncated"] is True
 
 
+class TestSearchResultDensify:
+    """Path-grouped densification of content-mode matches (lossless)."""
+
+    def _matches(self, n, paths=None):
+        # Real ripgrep output is path-ordered: all matches in a file are
+        # consecutive (verified against live search_files corpus). The fixture
+        # mirrors that — group by path, then enumerate lines within each.
+        paths = paths or ["a.py"]
+        out = []
+        per = max(1, n // len(paths))
+        ln = 0
+        for p in paths:
+            for _ in range(per):
+                ln += 1
+                out.append(SearchMatch(path=p, line_number=ln,
+                                       content=f"line content {ln}"))
+        # pad remainder onto the last path
+        while len(out) < n:
+            ln += 1
+            out.append(SearchMatch(path=paths[-1], line_number=ln,
+                                   content=f"line content {ln}"))
+        return out
+
+    def test_densify_off_by_default(self):
+        # The model-facing default must be unchanged for callers that don't
+        # opt in: verbose array, no matches_text key.
+        r = SearchResult(matches=self._matches(10), total_count=10)
+        d = r.to_dict()
+        assert "matches" in d
+        assert "matches_text" not in d
+
+    def test_densify_below_threshold_keeps_verbose(self):
+        # Too few matches: the grouping header would cost more than it saves,
+        # so we fall back to the verbose array even with densify=True.
+        r = SearchResult(matches=self._matches(4), total_count=4)
+        d = r.to_dict(densify=True)
+        assert "matches" in d
+        assert "matches_text" not in d
+
+    def test_densify_emits_path_grouped_text(self):
+        r = SearchResult(matches=self._matches(6, paths=["a.py", "b.py"]),
+                         total_count=6)
+        d = r.to_dict(densify=True)
+        assert "matches" not in d
+        assert "matches_text" in d
+        assert "matches_format" in d  # self-describing
+        text = d["matches_text"]
+        # Each path appears once as a group header, not repeated per match.
+        assert text.count("a.py") == 1
+        assert text.count("b.py") == 1
+
+    def test_densify_is_lossless(self):
+        # Every path, line number, and content byte must be recoverable from
+        # the dense form.
+        from agent.re_compat import re
+        matches = [
+            SearchMatch(path="src/x.py", line_number=12, content="    def foo():"),
+            SearchMatch(path="src/x.py", line_number=45, content="        return bar"),
+            SearchMatch(path="src/y.py", line_number=3, content="import os"),
+            SearchMatch(path="src/y.py", line_number=99, content="x = 1  # tail"),
+            SearchMatch(path="src/z.py", line_number=7, content="class Z:"),
+        ]
+        r = SearchResult(matches=matches, total_count=5)
+        text = r.to_dict(densify=True)["matches_text"]
+        # Reconstruct (path, line, content) triples from the grouped text.
+        recovered = []
+        cur = None
+        for ln in text.split("\n"):
+            row = re.match(r"^  (\d+): (.*)$", ln)
+            if row:
+                recovered.append((cur, int(row.group(1)), row.group(2)))
+            else:
+                cur = ln
+        assert len(recovered) == 5
+        for orig, rec in zip(matches, recovered):
+            assert rec[0] == orig.path
+            assert rec[1] == orig.line_number
+            # content is rstrip'd in the dense form; originals here have no
+            # trailing whitespace, so they must match exactly.
+            assert rec[2] == orig.content
+
+    def test_densify_smaller_than_verbose(self):
+        import orjson
+        matches = self._matches(40, paths=["pkg/module_one.py", "pkg/module_two.py"])
+        r = SearchResult(matches=matches, total_count=40)
+        verbose = orjson.dumps(r.to_dict(densify=False)).decode('utf-8')
+        dense = orjson.dumps(r.to_dict(densify=True)).decode('utf-8')
+        assert len(dense) < len(verbose)
+
+    @pytest.mark.parametrize("content", [
+        "x = {'k': 1, 'url': 'http://h:8080'}",   # colons in content
+        "        deeply.indented(call)",          # leading indentation preserved
+        "# \u65e5\u672c\u8a9e comment \U0001f525",  # unicode + emoji
+        "",                                        # empty content
+        "trailing spaces   ",                     # rstrip'd (see note below)
+        'mix "quotes" and , commas',              # punctuation that breaks naive CSV
+    ])
+    def test_densify_content_is_lossless(self, content):
+        # Every realistic single-line match content must round-trip exactly
+        # (trailing whitespace is the one documented transform — rstrip).
+        matches = [SearchMatch(path=f"f{i}.py", line_number=i + 1, content=content)
+                   for i in range(6)]
+        r = SearchResult(matches=matches, total_count=6)
+        text = r.to_dict(densify=True)["matches_text"]
+        recovered = []
+        cur = None
+        for ln in text.split("\n"):
+            row = re.match(r"^  (\d+): (.*)$", ln)
+            if row:
+                recovered.append(row.group(2))
+            else:
+                cur = ln
+        assert len(recovered) == 6
+        for got in recovered:
+            assert got == content.rstrip()
+
+    def test_densify_assumes_single_line_matches(self):
+        # The path-grouped format puts one match per line, so it relies on
+        # ripgrep's one-line-per-match contract (verified: 0/6775 real match
+        # contents contained a newline). This test documents that assumption:
+        # a (synthetic, never-produced-by-rg) multiline content would split
+        # across rows. If search ever emits multiline content, densify must
+        # escape newlines first.
+        matches = [SearchMatch(path="a.py", line_number=i + 1, content="single line")
+                   for i in range(6)]
+        text = SearchResult(matches=matches, total_count=6).to_dict(densify=True)["matches_text"]
+        # one header + six rows == 7 lines, no row spans multiple lines
+        body_rows = [ln for ln in text.split("\n") if re.match(r"^  \d+: ", ln)]
+        assert len(body_rows) == 6
+
+    def test_densify_paths_with_spaces(self):
+        matches = [SearchMatch(path="my dir/a b.py", line_number=i + 1, content=f"x{i}")
+                   for i in range(6)]
+        text = SearchResult(matches=matches, total_count=6).to_dict(densify=True)["matches_text"]
+        # path with spaces survives as a header line verbatim
+        assert "my dir/a b.py" in text.split("\n")[0]
+
+
 class TestLintResult:
     def test_skipped(self):
         r = LintResult(skipped=True, message="No linter for .md files")
@@ -320,6 +521,62 @@ class TestShellFileOpsHelpers:
         assert "'" in result
         # Should be safely escaped
         assert result.count("'") >= 4  # wrapping + escaping
+
+    def test_escape_shell_arg_rewrites_windows_drive_paths_to_msys(self, monkeypatch, file_ops):
+        # bash eats backslashes and MSYS mangles ``C:\...``; the Git Bash
+        # ``/c/...`` form is the reliable one (reuses _windows_to_msys_path).
+        import tools.environments.local as local_mod
+
+        monkeypatch.setattr(local_mod, "_IS_WINDOWS", True)
+        assert file_ops._escape_shell_arg(r"C:\Users\alice\notes.txt") == "'/c/Users/alice/notes.txt'"
+        # Non-drive paths are untouched.
+        assert file_ops._escape_shell_arg("/tmp/foo") == "'/tmp/foo'"
+
+    def test_escape_shell_arg_normalizes_mixed_msys_paths(self, monkeypatch, file_ops):
+        import tools.environments.local as local_mod
+
+        monkeypatch.setattr(local_mod, "_IS_WINDOWS", True)
+        mixed = r"/c/Users/Alexander\Documents\NewTEST\readme.txt"
+        assert file_ops._escape_shell_arg(mixed) == (
+            "'/c/Users/Alexander/Documents/NewTEST/readme.txt'"
+        )
+
+    def test_escape_shell_arg_rewrites_forward_slash_native_paths(self, monkeypatch, file_ops):
+        import tools.environments.local as local_mod
+
+        monkeypatch.setattr(local_mod, "_IS_WINDOWS", True)
+        assert file_ops._escape_shell_arg(
+            "C:/Users/alice/notes.txt"
+        ) == "'/c/Users/alice/notes.txt'"
+
+    @pytest.mark.skipif(sys.platform == 'win32', reason="Windows baseline: asserts bash path format `/c/Users/...` vs Windows `2>$null`")
+    def test_read_file_uses_bash_safe_windows_paths(self, mock_env, monkeypatch):
+        import tools.environments.local as local_mod
+
+        monkeypatch.setattr(local_mod, "_IS_WINDOWS", True)
+        commands = []
+
+        def side_effect(command, **kwargs):
+            commands.append(command)
+            if command.startswith("wc -c"):
+                return {"output": "5\n", "returncode": 0}
+            if command.startswith("head -c"):
+                return {"output": "hello", "returncode": 0}
+            if command.startswith("sed -n"):
+                return {"output": "hello\n", "returncode": 0}
+            if command.startswith("wc -l"):
+                return {"output": "1\n", "returncode": 0}
+            return {"output": "", "returncode": 0}
+
+        mock_env.execute.side_effect = side_effect
+        ops = ShellFileOperations(mock_env)
+        result = ops.read_file(r"C:\Users\alice\notes.txt")
+
+        assert result.error is None
+        assert commands[0] == "wc -c < '/c/Users/alice/notes.txt' 2>/dev/null"
+        assert commands[1] == "head -c 1000 '/c/Users/alice/notes.txt' 2>/dev/null"
+        assert commands[2] == "sed -n '1,500p' '/c/Users/alice/notes.txt'"
+        assert commands[3] == "wc -l < '/c/Users/alice/notes.txt'"
 
     def test_is_likely_binary_by_extension(self, file_ops):
         assert file_ops._is_likely_binary("photo.png") is True
@@ -497,27 +754,19 @@ class TestSearchPathValidation:
 
 
 class TestSearchFilesFallbackHiddenPaths:
-    def _make_env(self):
-        env = MagicMock()
-        env.cwd = "/"
-
-        def execute(command, **kwargs):
-            completed = subprocess.run(
-                command,
-                shell=True,
-                text=True,
-                capture_output=True,
-            )
-            return {
-                "output": completed.stdout,
-                "returncode": completed.returncode,
-            }
-
-        env.execute = execute
-        return env
+    def _make_env(self, monkeypatch):
+        # Use the real local backend so the portable Python fallback is
+        # exercised; this keeps the tests runnable on Windows where the POSIX
+        # ``find`` command does not exist. Force rg off so we hit the Python
+        # walk rather than the rg path (rg includes hidden descendants when
+        # the root path itself is hidden, which differs from the find/Python
+        # semantics these tests assert).
+        monkeypatch.setattr(tools.file_operations.shutil, "which", lambda name: None)
+        from tools.environments.local import LocalEnvironment
+        return LocalEnvironment()
 
     def test_hidden_root_with_hidden_ancestor_includes_files(self, tmp_path, monkeypatch):
-        """Fallback find should include visible files when path is inside hidden root."""
+        """Fallback search should include visible files when path is inside hidden root."""
         root = tmp_path / ".hermes" / "logs"
         root.mkdir(parents=True)
         visible_file = root / "agent.log"
@@ -529,15 +778,14 @@ class TestSearchFilesFallbackHiddenPaths:
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text("x")
 
-        ops = ShellFileOperations(self._make_env())
-        monkeypatch.setattr(ops, "_has_command", lambda command: command == "find")
+        ops = ShellFileOperations(self._make_env(monkeypatch))
         result = ops._search_files("*.log", str(root), limit=50, offset=0)
 
         assert result.error is None
         assert set(result.files) == {str(visible_file), str(visible_nested_file)}
 
     def test_normal_root_still_excludes_hidden_descendants(self, tmp_path, monkeypatch):
-        """Fallback find should still exclude hidden descendant paths for normal roots."""
+        """Fallback search should still exclude hidden descendant paths for normal roots."""
         root = tmp_path / "repo"
         root.mkdir()
         visible_file = root / "agent.log"
@@ -548,12 +796,45 @@ class TestSearchFilesFallbackHiddenPaths:
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text("x")
 
-        ops = ShellFileOperations(self._make_env())
-        monkeypatch.setattr(ops, "_has_command", lambda command: command == "find")
+        ops = ShellFileOperations(self._make_env(monkeypatch))
         result = ops._search_files("*.log", str(root), limit=50, offset=0)
 
         assert result.error is None
         assert set(result.files) == {str(visible_file), str(visible_nested_file)}
+
+
+class TestShellFileOpsWriteVerification:
+    def test_write_file_verification_catches_mismatch(self, file_ops, monkeypatch):
+        """If _atomic_write claims success but the on-disk size differs,
+        write_file returns an error instead of silent success."""
+        monkeypatch.setattr(
+            file_ops, "_atomic_write",
+            lambda path, content: ExecuteResult(stdout="5", exit_code=0)
+        )
+        monkeypatch.setattr(
+            file_ops, "_prim_stat_size",
+            lambda path: ExecuteResult(stdout="99", exit_code=0)
+        )
+        result = file_ops.write_file("/tmp/test.txt", "hello")
+        assert result.error is not None
+        assert "verification failed" in result.error.lower()
+        assert "did not persist" in result.error.lower()
+        assert result.bytes_written == 0
+
+    def test_write_file_verification_catches_unstatable(self, file_ops, monkeypatch):
+        """If the post-write stat itself fails, write_file returns an error."""
+        monkeypatch.setattr(
+            file_ops, "_atomic_write",
+            lambda path, content: ExecuteResult(stdout="5", exit_code=0)
+        )
+        monkeypatch.setattr(
+            file_ops, "_prim_stat_size",
+            lambda path: ExecuteResult(stdout="", exit_code=1)
+        )
+        result = file_ops.write_file("/tmp/test.txt", "hello")
+        assert result.error is not None
+        assert "could not stat" in result.error.lower()
+        assert result.bytes_written == 0
 
 
 class TestShellFileOpsWriteDenied:
@@ -879,8 +1160,11 @@ class TestIsLocalEnv:
 # =========================================================================
 
 
+@pytest.mark.usefixtures("fake_ripgrepy")
 class TestSearchFilesRgRipgrepy:
     """Tests for _search_files_rg_ripgrepy on local backends."""
+
+    _RG_PATH = "/usr/bin/rg"
 
     @staticmethod
     def _make_local_ops():
@@ -903,7 +1187,7 @@ class TestSearchFilesRgRipgrepy:
 
         monkeypatch.setattr(subprocess, "run", fake_run)
 
-        result = ops._search_files_rg_ripgrepy("foo.py", str(tmp_path), 50, 0)
+        result = ops._search_files_rg_ripgrepy("foo.py", str(tmp_path), 50, 0, self._RG_PATH)
 
         assert result.error is None
         assert "--glob" in captured_cmds[0]
@@ -921,7 +1205,7 @@ class TestSearchFilesRgRipgrepy:
 
         monkeypatch.setattr(subprocess, "run", fake_run)
 
-        ops._search_files_rg_ripgrepy("src/foo.py", str(tmp_path), 50, 0)
+        ops._search_files_rg_ripgrepy("src/foo.py", str(tmp_path), 50, 0, self._RG_PATH)
 
         assert "--glob" in captured_cmds[0]
         assert "src/foo.py" in captured_cmds[0]
@@ -938,9 +1222,9 @@ class TestSearchFilesRgRipgrepy:
 
         monkeypatch.setattr(subprocess, "run", fake_run)
 
-        ops._search_files_rg_ripgrepy("test.py", str(tmp_path), 50, 0)
+        ops._search_files_rg_ripgrepy("test.py", str(tmp_path), 50, 0, self._RG_PATH)
 
-        assert "--sortr" in captured_cmds[0]
+        assert any("--sortr" in arg for arg in captured_cmds[0])
 
     def test_fallbacks_to_shell_on_error(self, tmp_path, monkeypatch):
         """On subprocess error, falls back to _search_files_rg_shell."""
@@ -955,7 +1239,7 @@ class TestSearchFilesRgRipgrepy:
         monkeypatch.setattr(ops, "_search_files_rg_shell",
                            lambda p, pa, l, o: SearchResult(files=["fallback.py"], total_count=1))
 
-        result = ops._search_files_rg_ripgrepy("test.py", str(tmp_path), 50, 0)
+        result = ops._search_files_rg_ripgrepy("test.py", str(tmp_path), 50, 0, self._RG_PATH)
         assert result.files == ["fallback.py"]
 
     def test_results_sliced_with_offset_and_limit(self, tmp_path, monkeypatch):
@@ -968,7 +1252,7 @@ class TestSearchFilesRgRipgrepy:
 
         monkeypatch.setattr(subprocess, "run", fake_run)
 
-        result = ops._search_files_rg_ripgrepy("file_*.py", str(tmp_path), 3, 2)
+        result = ops._search_files_rg_ripgrepy("file_*.py", str(tmp_path), 3, 2, self._RG_PATH)
         assert result.files == ["file_2.py", "file_3.py", "file_4.py"]
         assert result.total_count == 10
         assert result.truncated is True
@@ -979,8 +1263,11 @@ class TestSearchFilesRgRipgrepy:
 # =========================================================================
 
 
+@pytest.mark.usefixtures("fake_ripgrepy")
 class TestSearchWithRgRipgrepy:
     """Tests for _search_with_rg_ripgrepy on local backends."""
+
+    _RG_PATH = "/usr/bin/rg"
 
     @staticmethod
     def _make_local_ops():
@@ -1002,7 +1289,7 @@ class TestSearchWithRgRipgrepy:
 
         monkeypatch.setattr(subprocess, "run", fake_run)
 
-        result = ops._search_with_rg_ripgrepy("hello", str(tmp_path), None, 50, 0, "content", 0)
+        result = ops._search_with_rg_ripgrepy("hello", str(tmp_path), None, 50, 0, "content", 0, self._RG_PATH)
 
         assert result.error is None
         assert len(result.matches) == 1
@@ -1023,7 +1310,7 @@ class TestSearchWithRgRipgrepy:
 
         monkeypatch.setattr(subprocess, "run", fake_run)
 
-        result = ops._search_with_rg_ripgrepy("pattern", str(tmp_path), None, 50, 0, "files_only", 0)
+        result = ops._search_with_rg_ripgrepy("pattern", str(tmp_path), None, 50, 0, "files_only", 0, self._RG_PATH)
 
         assert "--files-with-matches" in captured_cmds[0]
         assert result.files == ["src/a.py", "src/b.py"]
@@ -1039,7 +1326,7 @@ class TestSearchWithRgRipgrepy:
 
         monkeypatch.setattr(subprocess, "run", fake_run)
 
-        result = ops._search_with_rg_ripgrepy("pattern", str(tmp_path), None, 50, 0, "count", 0)
+        result = ops._search_with_rg_ripgrepy("pattern", str(tmp_path), None, 50, 0, "count", 0, self._RG_PATH)
 
         assert "--count-matches" in captured_cmds[0]
         assert result.counts == {"src/a.py": 5}
@@ -1055,7 +1342,7 @@ class TestSearchWithRgRipgrepy:
 
         monkeypatch.setattr(subprocess, "run", fake_run)
 
-        ops._search_with_rg_ripgrepy("pattern", str(tmp_path), "*.py", 50, 0, "content", 0)
+        ops._search_with_rg_ripgrepy("pattern", str(tmp_path), "*.py", 50, 0, "content", 0, self._RG_PATH)
 
         assert "--glob" in captured_cmds[0]
         assert "*.py" in captured_cmds[0]
@@ -1071,7 +1358,7 @@ class TestSearchWithRgRipgrepy:
 
         monkeypatch.setattr(subprocess, "run", fake_run)
 
-        ops._search_with_rg_ripgrepy("pattern", str(tmp_path), None, 50, 0, "content", 3)
+        ops._search_with_rg_ripgrepy("pattern", str(tmp_path), None, 50, 0, "content", 3, self._RG_PATH)
 
         assert "--context" in captured_cmds[0]
         assert "3" in captured_cmds[0]
@@ -1085,7 +1372,7 @@ class TestSearchWithRgRipgrepy:
 
         monkeypatch.setattr(subprocess, "run", fake_run)
 
-        result = ops._search_with_rg_ripgrepy("pattern", str(tmp_path), None, 50, 0, "content", 0)
+        result = ops._search_with_rg_ripgrepy("pattern", str(tmp_path), None, 50, 0, "content", 0, self._RG_PATH)
 
         assert result.error is None
         assert len(result.matches) == 1
@@ -1100,7 +1387,7 @@ class TestSearchWithRgRipgrepy:
 
         monkeypatch.setattr(subprocess, "run", fake_run)
 
-        result = ops._search_with_rg_ripgrepy("pattern", str(tmp_path), None, 50, 0, "content", 0)
+        result = ops._search_with_rg_ripgrepy("pattern", str(tmp_path), None, 50, 0, "content", 0, self._RG_PATH)
 
         assert result.error is not None
         assert "Search failed" in result.error
@@ -1114,7 +1401,7 @@ class TestSearchWithRgRipgrepy:
 
         monkeypatch.setattr(subprocess, "run", fake_run)
 
-        result = ops._search_with_rg_ripgrepy("zxzxzx_nonexistent", str(tmp_path), None, 50, 0, "content", 0)
+        result = ops._search_with_rg_ripgrepy("zxzxzx_nonexistent", str(tmp_path), None, 50, 0, "content", 0, self._RG_PATH)
 
         assert result.error is None
         assert result.total_count == 0
@@ -1131,7 +1418,7 @@ class TestSearchWithRgRipgrepy:
                            lambda p, pa, fg, l, o, om, c: SearchResult(
                                files=["fallback.py"], total_count=1))
 
-        result = ops._search_with_rg_ripgrepy("test", str(tmp_path), None, 50, 0, "files_only", 0)
+        result = ops._search_with_rg_ripgrepy("test", str(tmp_path), None, 50, 0, "files_only", 0, self._RG_PATH)
         assert result.files == ["fallback.py"]
 
 
@@ -1158,7 +1445,7 @@ class TestRgDispatchToRipgrepy:
 
         called = {"ripgrepy": False, "shell": False}
         monkeypatch.setattr(ops, "_search_files_rg_ripgrepy",
-                           lambda p, pa, l, o: called.update({"ripgrepy": True}) or SearchResult())
+                           lambda p, pa, l, o, rp: called.update({"ripgrepy": True}) or SearchResult())
         monkeypatch.setattr(ops, "_search_files_rg_shell",
                            lambda p, pa, l, o: called.update({"shell": True}) or SearchResult())
 
@@ -1175,7 +1462,7 @@ class TestRgDispatchToRipgrepy:
 
         called = {"ripgrepy": False, "shell": False}
         monkeypatch.setattr(ops, "_search_files_rg_ripgrepy",
-                           lambda p, pa, l, o: called.update({"ripgrepy": True}) or SearchResult())
+                           lambda p, pa, l, o, rp: called.update({"ripgrepy": True}) or SearchResult())
         monkeypatch.setattr(ops, "_search_files_rg_shell",
                            lambda p, pa, l, o: called.update({"shell": True}) or SearchResult())
 
@@ -1190,7 +1477,7 @@ class TestRgDispatchToRipgrepy:
 
         called = {"ripgrepy": False, "shell": False}
         monkeypatch.setattr(ops, "_search_with_rg_ripgrepy",
-                           lambda p, pa, fg, l, o, om, c: called.update({"ripgrepy": True}) or SearchResult())
+                           lambda p, pa, fg, l, o, om, c, rp: called.update({"ripgrepy": True}) or SearchResult())
         monkeypatch.setattr(ops, "_search_with_rg_shell",
                            lambda p, pa, fg, l, o, om, c: called.update({"shell": True}) or SearchResult())
 
@@ -1207,7 +1494,7 @@ class TestRgDispatchToRipgrepy:
 
         called = {"ripgrepy": False, "shell": False}
         monkeypatch.setattr(ops, "_search_with_rg_ripgrepy",
-                           lambda p, pa, fg, l, o, om, c: called.update({"ripgrepy": True}) or SearchResult())
+                           lambda p, pa, fg, l, o, om, c, rp: called.update({"ripgrepy": True}) or SearchResult())
         monkeypatch.setattr(ops, "_search_with_rg_shell",
                            lambda p, pa, fg, l, o, om, c: called.update({"shell": True}) or SearchResult())
 

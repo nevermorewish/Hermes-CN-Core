@@ -14,9 +14,10 @@ re-exports from ``run_agent`` remain in place so existing imports
 
 from __future__ import annotations
 
+import orjson
 import json
 import logging
-import re
+from agent.re_compat import re
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -31,7 +32,7 @@ _SURROGATE_RE = re.compile(r'[\ud800-\udfff]')
 def _sanitize_surrogates(text: str) -> str:
     """Replace lone surrogate code points with U+FFFD (replacement character).
 
-    Surrogates are invalid in UTF-8 and will crash ``json.dumps()`` inside the
+    Surrogates are invalid in UTF-8 and will crash ``orjson.dumps().decode('utf-8')`` inside the
     OpenAI SDK.  This is a fast no-op when the text contains no surrogates.
     """
     if _SURROGATE_RE.search(text):
@@ -210,14 +211,14 @@ def _repair_tool_call_arguments(raw_args: str, tool_name: str = "?") -> str:
     # the most common local-model repair case (#12068).
     try:
         parsed = json.loads(raw_stripped, strict=False)
-        reserialised = json.dumps(parsed, separators=(",", ":"))
+        reserialised = json.dumps(parsed)
         if reserialised != raw_stripped:
             logger.warning(
                 "Repaired unescaped control chars in tool_call arguments for %s",
                 tool_name,
             )
         return reserialised
-    except (json.JSONDecodeError, TypeError, ValueError):
+    except (orjson.JSONDecodeError, TypeError, ValueError):
         pass
 
     # Attempt common JSON repairs
@@ -234,9 +235,9 @@ def _repair_tool_call_arguments(raw_args: str, tool_name: str = "?") -> str:
     # 3. Remove excess closing braces/brackets (bounded to 50 iterations)
     for _ in range(50):
         try:
-            json.loads(fixed)
+            orjson.loads(fixed)
             break
-        except json.JSONDecodeError:
+        except orjson.JSONDecodeError:
             if fixed.endswith('}') and fixed.count('}') > fixed.count('{'):
                 fixed = fixed[:-1]
             elif fixed.endswith(']') and fixed.count(']') > fixed.count('['):
@@ -245,13 +246,13 @@ def _repair_tool_call_arguments(raw_args: str, tool_name: str = "?") -> str:
                 break
 
     try:
-        json.loads(fixed)
+        orjson.loads(fixed)
         logger.warning(
             "Repaired malformed tool_call arguments for %s: %s → %s",
             tool_name, raw_stripped[:80], fixed[:80],
         )
         return fixed
-    except json.JSONDecodeError:
+    except orjson.JSONDecodeError:
         pass
 
     # Repair pass 4: escape unescaped control chars inside JSON strings,
@@ -260,13 +261,13 @@ def _repair_tool_call_arguments(raw_args: str, tool_name: str = "?") -> str:
     try:
         escaped = _escape_invalid_chars_in_json_strings(fixed)
         if escaped != fixed:
-            json.loads(escaped)
+            orjson.loads(escaped)
             logger.warning(
                 "Repaired control-char-laced tool_call arguments for %s: %s → %s",
                 tool_name, raw_stripped[:80], escaped[:80],
             )
             return escaped
-    except (json.JSONDecodeError, TypeError, ValueError):
+    except (orjson.JSONDecodeError, TypeError, ValueError):
         pass
 
     # Last resort: replace with empty object so the API request doesn't
@@ -277,6 +278,38 @@ def _repair_tool_call_arguments(raw_args: str, tool_name: str = "?") -> str:
         tool_name, raw_stripped[:80],
     )
     return "{}"
+
+
+def close_interrupted_tool_sequence(messages: list, final_response: Any = None) -> bool:
+    """Append a synthetic assistant turn when an interrupted tail is a tool result.
+
+    A turn cut short by ``/stop`` can leave the transcript ending on a raw
+    ``tool`` message (a tool finished, or its execution was cancelled, but the
+    model never streamed a closing assistant turn). Persisting that tail means
+    the next user message lands as ``… tool → user`` — a role-alternation
+    violation that strict providers (Gemini, Claude) react to by hallucinating
+    a continuation of the user's message and ignoring prior context, which
+    reads to the user as "lost context" (#48879).
+
+    ``finalize_turn`` closes this on the happy interrupt path, but the
+    retry/backoff/error interrupt aborts in ``conversation_loop`` ``return``
+    early and never reach it — this shared helper closes the sequence on all of
+    them. ``final_response`` is usually empty on an interrupt, so an explicit
+    placeholder is used rather than an empty-content assistant turn.
+
+    Mutates ``messages`` in place. Returns True if a closing turn was appended.
+    """
+    if not messages:
+        return False
+    last = messages[-1]
+    if not isinstance(last, dict) or last.get("role") != "tool":
+        return False
+    text = final_response if isinstance(final_response, str) else ""
+    messages.append({
+        "role": "assistant",
+        "content": text.strip() or "Operation interrupted.",
+    })
+    return True
 
 
 def _strip_non_ascii(text: str) -> str:
@@ -431,6 +464,7 @@ def _sanitize_structure_non_ascii(payload: Any) -> bool:
 
 __all__ = [
     "_SURROGATE_RE",
+    "close_interrupted_tool_sequence",
     "_sanitize_surrogates",
     "_sanitize_structure_surrogates",
     "_sanitize_messages_surrogates",

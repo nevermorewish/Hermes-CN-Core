@@ -2,7 +2,7 @@
 
 The ``_ensure_telegram_mock`` helper guarantees that a minimal mock of
 the ``telegram`` package is registered in :data:`sys.modules` **before**
-any test file triggers ``from gateway.platforms.telegram import ...``.
+any test file triggers ``from plugins.platforms.telegram.adapter import ...``.
 
 Without this, ``pytest-xdist`` workers that happen to collect
 ``test_telegram_caption_merge.py`` (bare top-level import, no per-file
@@ -39,6 +39,15 @@ from unittest.mock import MagicMock
 import pytest
 
 
+def make_async_session_db(sync_mock=None):
+    """Wrap a sync mock SessionDB in AsyncSessionDB so gateway code that awaits
+    the facade works in tests. Returns (facade, sync_mock); configure return
+    values and assert calls on sync_mock."""
+    from hermes_state import AsyncSessionDB
+    sync_mock = sync_mock if sync_mock is not None else MagicMock()
+    return AsyncSessionDB(sync_mock), sync_mock
+
+
 def _ensure_telegram_mock() -> None:
     """Install a comprehensive telegram mock in sys.modules.
 
@@ -60,15 +69,21 @@ def _ensure_telegram_mock() -> None:
     mod.constants.ChatType.SUPERGROUP = "supergroup"
     mod.constants.ChatType.CHANNEL = "channel"
 
-    # Real exception classes so ``except (NetworkError, ...)`` clauses
-    # in production code don't blow up with TypeError.
-    mod.error.NetworkError = type("NetworkError", (OSError,), {})
-    mod.error.TimedOut = type("TimedOut", (OSError,), {})
-    mod.error.BadRequest = type("BadRequest", (Exception,), {})
-    mod.error.Forbidden = type("Forbidden", (Exception,), {})
-    mod.error.InvalidToken = type("InvalidToken", (Exception,), {})
-    mod.error.RetryAfter = type("RetryAfter", (Exception,), {"retry_after": 1})
-    mod.error.Conflict = type("Conflict", (Exception,), {})
+    # Mirror PTB's exception hierarchy: BadRequest is a semantic API error,
+    # but inherits from NetworkError in python-telegram-bot 22.x.
+    mod.error.TelegramError = type("TelegramError", (Exception,), {})
+    mod.error.NetworkError = type("NetworkError", (mod.error.TelegramError,), {})
+    mod.error.TimedOut = type("TimedOut", (mod.error.NetworkError,), {})
+    mod.error.BadRequest = type("BadRequest", (mod.error.NetworkError,), {})
+    mod.error.Forbidden = type("Forbidden", (mod.error.TelegramError,), {})
+    mod.error.InvalidToken = type("InvalidToken", (mod.error.TelegramError,), {})
+
+    class RetryAfter(mod.error.TelegramError):
+        def __init__(self, retry_after=1):
+            self.retry_after = retry_after
+
+    mod.error.RetryAfter = RetryAfter
+    mod.error.Conflict = type("Conflict", (mod.error.TelegramError,), {})
 
     # Update.ALL_TYPES used in start_polling()
     mod.Update.ALL_TYPES = []
@@ -182,6 +197,7 @@ def _ensure_discord_mock() -> None:
     discord_mod.Color = SimpleNamespace(
         orange=lambda: 1, green=lambda: 2, blue=lambda: 3,
         red=lambda: 4, purple=lambda: 5, greyple=lambda: 6,
+        gold=lambda: 7,
     )
 
     # app_commands — needed by _register_slash_commands auto-registration
@@ -342,7 +358,7 @@ def _run_adapter_antipattern_scan() -> list[str]:
         if path.name in {"_plugin_adapter_loader.py", "conftest.py"}:
             continue
         try:
-            source = path.read_text(encoding="utf-8")
+            source = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
         # Fast string pre-filter: skip files that can't possibly violate.
@@ -429,7 +445,7 @@ def pytest_configure(config):
 
     with lock:
         if cache_file.exists():
-            cached = cache_file.read_text(encoding="utf-8")
+            cached = cache_file.read_text(encoding="utf-8", errors="replace")
             if cached == "clean":
                 return
             raise pytest.UsageError(cached)

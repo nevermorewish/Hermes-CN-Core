@@ -10,7 +10,7 @@ Usage:
 """
 
 import argparse
-import json
+import orjson
 import os
 import sys
 
@@ -28,9 +28,12 @@ def _check_config():
     if not CANVAS_BASE_URL:
         missing.append("CANVAS_BASE_URL")
     if missing:
+        hermes_env = os.path.join(
+            os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes")), ".env"
+        )
         print(
             f"Missing required environment variables: {', '.join(missing)}\n"
-            "Set them in ~/.hermes/.env or export them in your shell.\n"
+            f"Set them in {hermes_env} or export them in your shell.\n"
             "See the canvas skill SKILL.md for setup instructions.",
             file=sys.stderr,
         )
@@ -86,7 +89,7 @@ def list_courses(args):
         }
         for c in courses
     ]
-    print(json.dumps(output, indent=2))
+    print(orjson.dumps(output, option=orjson.OPT_INDENT_2).decode('utf-8'))
 
 
 def list_assignments(args):
@@ -114,7 +117,7 @@ def list_assignments(args):
         }
         for a in assignments
     ]
-    print(json.dumps(output, indent=2))
+    print(orjson.dumps(output, option=orjson.OPT_INDENT_2).decode('utf-8'))
 
 
 # =========================================================================

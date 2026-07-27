@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import io
-import json
+import sys
+import orjson
 from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
@@ -80,6 +81,7 @@ class TestHooksList:
 
 
 class TestHooksTest:
+    @pytest.mark.skipif(sys.platform == "win32", reason="shell hooks execute POSIX shell scripts (exec bit / shebang semantics)")
     def test_synthetic_payload_matches_production_shape(self, tmp_path):
         """`hermes hooks test` must feed the script stdin in the same
         shape invoke_hook() would at runtime.  Prior to this fix,
@@ -98,7 +100,7 @@ class TestHooksTest:
                 for_tool=None, payload_file=None,
             ))
 
-        seen = json.loads(capture.read_text())
+        seen = orjson.loads(capture.read_text())
         # Same top-level keys _serialize_payload produces at runtime
         assert set(seen.keys()) == {
             "hook_event_name", "tool_name", "tool_input",
@@ -110,6 +112,8 @@ class TestHooksTest:
         # subagent_stop has no tool, so tool_name / tool_input are null
         assert seen["tool_name"] is None
         assert seen["tool_input"] is None
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="shell hooks execute POSIX shell scripts (exec bit / shebang semantics)")
 
     def test_fires_real_subprocess_and_parses_block(self, tmp_path):
         block_script = _hook_script(
@@ -185,6 +189,7 @@ class TestHooksRevoke:
 
 
 class TestHooksDoctor:
+    @pytest.mark.skipif(sys.platform == "win32", reason="shell hooks execute POSIX shell scripts (exec bit / shebang semantics)")
     def test_flags_missing_exec_bit(self, tmp_path):
         script = tmp_path / "hook.sh"
         script.write_text("#!/usr/bin/env bash\nprintf '{}\\n'\n")
@@ -200,6 +205,8 @@ class TestHooksDoctor:
         with patch("hermes_cli.config.load_config", return_value=cfg):
             out = _run(SimpleNamespace(hooks_action="doctor"))
         assert "not allowlisted" in out.lower()
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="shell hooks execute POSIX shell scripts (exec bit / shebang semantics)")
 
     def test_flags_invalid_json(self, tmp_path):
         script = _hook_script(
@@ -219,7 +226,7 @@ class TestHooksDoctor:
         # Manually stash an allowlist entry with an old mtime
         from agent.shell_hooks import allowlist_path
         allowlist_path().parent.mkdir(parents=True, exist_ok=True)
-        allowlist_path().write_text(json.dumps({
+        allowlist_path().write_text(orjson.dumps({
             "approvals": [
                 {
                     "event": "on_session_start",
@@ -228,12 +235,14 @@ class TestHooksDoctor:
                     "script_mtime_at_approval": "2000-01-01T00:00:00Z",
                 }
             ]
-        }))
+        }).decode('utf-8'))
 
         cfg = {"hooks": {"on_session_start": [{"command": str(script)}]}}
         with patch("hermes_cli.config.load_config", return_value=cfg):
             out = _run(SimpleNamespace(hooks_action="doctor"))
         assert "modified since approval" in out
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="shell hooks execute POSIX shell scripts (exec bit / shebang semantics)")
 
     def test_clean_script_runs(self, tmp_path):
         script = _hook_script(tmp_path, "#!/usr/bin/env bash\nprintf '{}\\n'\n")

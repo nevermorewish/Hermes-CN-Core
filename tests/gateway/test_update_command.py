@@ -4,7 +4,9 @@ Tests both the _handle_update_command handler (spawns update process) and
 the _send_update_notification startup hook (sends results after restart).
 """
 
-import json
+import sys
+
+import orjson
 from pathlib import Path
 from unittest.mock import patch, MagicMock, AsyncMock
 
@@ -51,10 +53,16 @@ class TestHandleUpdateCommand:
         event = _make_event()
         monkeypatch.setenv("HERMES_MANAGED", "homebrew")
 
-        result = await runner._handle_update_command(event)
+        # Guard: prevent any accidental fall-through from spawning a real
+        # `hermes update --gateway` against the CI checkout. The managed-install
+        # guard should return before Popen is ever reached, but mock it as
+        # belt-and-suspenders so a premature return doesn't corrupt the repo.
+        with patch("subprocess.Popen") as mock_popen:
+            result = await runner._handle_update_command(event)
 
         assert "managed by Homebrew" in result
         assert "brew upgrade hermes-agent" in result
+        mock_popen.assert_not_called()  # must return before reaching Popen
 
     @pytest.mark.asyncio
     async def test_no_git_directory(self, tmp_path):
@@ -86,12 +94,15 @@ class TestHandleUpdateCommand:
             class FakePath(type(Path())):
                 pass
 
-            # Actually, simplest: just patch the specific file attr
-            fake_file = str(fake_root / "gateway" / "run.py")
+            # Actually, simplest: just patch the specific file attr.
+            # The _handle_update_command handler lives in gateway/slash_commands.py
+            # (extracted from run.py in the god-file decomposition); it resolves
+            # project_root via Path(__file__).parent.parent, so fake that file.
+            fake_file = str(fake_root / "gateway" / "slash_commands.py")
             (fake_root / "gateway").mkdir(parents=True)
-            (fake_root / "gateway" / "run.py").touch()
+            (fake_root / "gateway" / "slash_commands.py").touch()
 
-            with patch("gateway.run.__file__", fake_file):
+            with patch("gateway.slash_commands.__file__", fake_file):
                 result = await runner._handle_update_command(event)
 
         assert "Not a git repository" in result
@@ -208,7 +219,7 @@ class TestHandleUpdateCommand:
 
         pending_path = hermes_home / ".update_pending.json"
         assert pending_path.exists()
-        data = json.loads(pending_path.read_text())
+        data = orjson.loads(pending_path.read_text())
         assert data["platform"] == "telegram"
         assert data["chat_id"] == "99999"
         assert data["chat_type"] == "dm"
@@ -242,10 +253,11 @@ class TestHandleUpdateCommand:
              patch("subprocess.Popen"):
             await runner._handle_update_command(event)
 
-        data = json.loads((hermes_home / ".update_pending.json").read_text())
+        data = orjson.loads((hermes_home / ".update_pending.json").read_text())
         assert data["thread_id"] == "777"
         assert data["message_id"] == "m-update-thread"
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX setsid/bash spawn path; Windows uses a python -c detach helper in the implementation")
     @pytest.mark.asyncio
     async def test_spawns_setsid(self, tmp_path):
         """Uses setsid when available."""
@@ -275,6 +287,7 @@ class TestHandleUpdateCommand:
         assert ".update_exit_code" in call_args[-1]
         assert "Starting Hermes update" in result
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX setsid/bash spawn path; Windows uses a python -c detach helper in the implementation")
     @pytest.mark.asyncio
     async def test_fallback_when_no_setsid(self, tmp_path):
         """Falls back to start_new_session=True when setsid is not available."""
@@ -366,6 +379,158 @@ class TestHandleUpdateCommand:
 
 
 # ---------------------------------------------------------------------------
+# Platform allowlist gate
+# ---------------------------------------------------------------------------
+
+
+class TestUpdateCommandPlatformGate:
+    """Tests for the platform-allowlist gate at the top of
+    ``_handle_update_command``.  Built-in messaging platforms are listed in
+    ``_UPDATE_ALLOWED_PLATFORMS``; plugin-migrated platforms (discord,
+    mattermost, teams, …) are NOT in the frozenset and rely on the
+    registry's ``allow_update_command=True`` fallback.  Programmatic
+    interfaces (ACP, API server, webhooks) must be blocked.
+    """
+
+    @pytest.mark.asyncio
+    async def test_blocks_programmatic_interface(self, monkeypatch):
+        """``Platform.WEBHOOK`` is not a messaging platform and must be
+        blocked by the allowlist gate before any side effects fire."""
+        runner = _make_runner()
+        event = _make_event(platform=Platform.WEBHOOK)
+        monkeypatch.setenv("HERMES_MANAGED", "")
+
+        # Guard: platform gate must fire before any real subprocess spawn.
+        with patch("subprocess.Popen") as mock_popen:
+            result = await runner._handle_update_command(event)
+
+        # The exact rejection message comes from
+        # ``gateway.update.platform_not_messaging`` translation key.
+        assert "only available from messaging platforms" in result
+        mock_popen.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_blocks_api_server_platform(self, monkeypatch):
+        """``Platform.API_SERVER`` (programmatic, not messaging) must be
+        blocked by the allowlist gate.
+        """
+        runner = _make_runner()
+        event = _make_event(platform=Platform.API_SERVER)
+        monkeypatch.setenv("HERMES_MANAGED", "")
+
+        with patch("subprocess.Popen") as mock_popen:
+            result = await runner._handle_update_command(event)
+
+        assert "only available from messaging platforms" in result
+        mock_popen.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_allows_plugin_platform_via_registry_fallback(self, monkeypatch):
+        """A plugin-migrated platform (DISCORD) is no longer in
+        ``_UPDATE_ALLOWED_PLATFORMS`` but must still pass the gate via
+        the registry's ``allow_update_command=True`` flag.
+
+        This test is the empirical guarantee that removing DISCORD from
+        the hardcoded frozenset does not regress the /update command for
+        Discord users.
+        """
+        from gateway.run import GatewayRunner
+
+        # Precondition: DISCORD is NOT in the hardcoded set anymore.
+        assert Platform.DISCORD not in GatewayRunner._UPDATE_ALLOWED_PLATFORMS
+
+        # Make sure the plugin registry is populated so the fallback fires.
+        from hermes_cli.plugins import PluginManager
+        PluginManager().discover_and_load(force=True)
+        from gateway.platform_registry import platform_registry
+        discord_entry = platform_registry.get("discord")
+        assert discord_entry is not None
+        assert discord_entry.allow_update_command is True
+
+        runner = _make_runner()
+        event = _make_event(platform=Platform.DISCORD)
+        monkeypatch.setenv("HERMES_MANAGED", "")
+
+        with patch("subprocess.Popen"):
+            result = await runner._handle_update_command(event)
+
+        # The gate must NOT have rejected us — anything other than the
+        # ``platform_not_messaging`` rejection string is acceptable here.
+        # Later steps may legitimately return success ("Starting Hermes
+        # update…") or fail for environment reasons.
+        assert "only available from messaging platforms" not in result
+
+    @pytest.mark.asyncio
+    async def test_allows_mattermost_via_registry_fallback(self, monkeypatch):
+        """Same as DISCORD: MATTERMOST is now plugin-migrated and not in
+        the hardcoded frozenset; the registry must keep /update working.
+        """
+        from gateway.run import GatewayRunner
+
+        assert Platform.MATTERMOST not in GatewayRunner._UPDATE_ALLOWED_PLATFORMS
+
+        from hermes_cli.plugins import PluginManager
+        PluginManager().discover_and_load(force=True)
+        from gateway.platform_registry import platform_registry
+        mm_entry = platform_registry.get("mattermost")
+        assert mm_entry is not None
+        assert mm_entry.allow_update_command is True
+
+        runner = _make_runner()
+        event = _make_event(platform=Platform.MATTERMOST)
+        monkeypatch.setenv("HERMES_MANAGED", "")
+
+        with patch("subprocess.Popen"):
+            result = await runner._handle_update_command(event)
+
+        assert "only available from messaging platforms" not in result
+
+    @pytest.mark.asyncio
+    async def test_allows_homeassistant_via_registry_fallback(self, monkeypatch):
+        """Same as DISCORD/MATTERMOST: HOMEASSISTANT is now plugin-migrated
+        (PR #40709) and not in the hardcoded frozenset; the registry must
+        keep /update working via ``allow_update_command=True``.
+        """
+        from gateway.run import GatewayRunner
+
+        assert Platform.HOMEASSISTANT not in GatewayRunner._UPDATE_ALLOWED_PLATFORMS
+
+        from hermes_cli.plugins import PluginManager
+        PluginManager().discover_and_load(force=True)
+        from gateway.platform_registry import platform_registry
+        ha_entry = platform_registry.get("homeassistant")
+        assert ha_entry is not None
+        assert ha_entry.allow_update_command is True
+
+        runner = _make_runner()
+        event = _make_event(platform=Platform.HOMEASSISTANT)
+        monkeypatch.setenv("HERMES_MANAGED", "")
+
+        with patch("subprocess.Popen"):
+            result = await runner._handle_update_command(event)
+
+        assert "only available from messaging platforms" not in result
+
+    @pytest.mark.asyncio
+    async def test_allows_builtin_platform_in_allowlist(self, monkeypatch):
+        """``Platform.TELEGRAM`` is in the hardcoded allowlist — gate
+        must pass without consulting the registry.
+        """
+        from gateway.run import GatewayRunner
+
+        assert Platform.TELEGRAM in GatewayRunner._UPDATE_ALLOWED_PLATFORMS
+
+        runner = _make_runner()
+        event = _make_event(platform=Platform.TELEGRAM)
+        monkeypatch.setenv("HERMES_MANAGED", "")
+
+        with patch("subprocess.Popen"):
+            result = await runner._handle_update_command(event)
+
+        assert "only available from messaging platforms" not in result
+
+
+# ---------------------------------------------------------------------------
 # _send_update_notification
 # ---------------------------------------------------------------------------
 
@@ -392,9 +557,9 @@ class TestSendUpdateNotification:
         hermes_home.mkdir()
 
         pending_path = hermes_home / ".update_pending.json"
-        pending_path.write_text(json.dumps({
+        pending_path.write_text(orjson.dumps({
             "platform": "telegram", "chat_id": "67890", "user_id": "12345",
-        }))
+        }).decode('utf-8'))
         (hermes_home / ".update_output.txt").write_text("still running")
 
         mock_adapter = AsyncMock()
@@ -415,9 +580,9 @@ class TestSendUpdateNotification:
         hermes_home.mkdir()
 
         claimed_path = hermes_home / ".update_pending.claimed.json"
-        claimed_path.write_text(json.dumps({
+        claimed_path.write_text(orjson.dumps({
             "platform": "telegram", "chat_id": "67890", "user_id": "12345",
-        }))
+        }).decode('utf-8'))
         (hermes_home / ".update_output.txt").write_text("done")
         (hermes_home / ".update_exit_code").write_text("0")
 
@@ -445,7 +610,7 @@ class TestSendUpdateNotification:
             "user_id": "12345",
             "timestamp": "2026-03-04T21:00:00",
         }
-        (hermes_home / ".update_pending.json").write_text(json.dumps(pending))
+        (hermes_home / ".update_pending.json").write_text(orjson.dumps(pending).decode('utf-8'))
         (hermes_home / ".update_output.txt").write_text(
             "→ Found 3 new commit(s)\n✓ Code updated!\n✓ Update complete!"
         )
@@ -479,7 +644,7 @@ class TestSendUpdateNotification:
             "message_id": "m-update-thread",
             "user_id": "12345",
         }
-        (hermes_home / ".update_pending.json").write_text(json.dumps(pending))
+        (hermes_home / ".update_pending.json").write_text(orjson.dumps(pending).decode('utf-8'))
         (hermes_home / ".update_output.txt").write_text("done")
         (hermes_home / ".update_exit_code").write_text("0")
 
@@ -504,7 +669,7 @@ class TestSendUpdateNotification:
         hermes_home.mkdir()
 
         pending = {"platform": "telegram", "chat_id": "111", "user_id": "222"}
-        (hermes_home / ".update_pending.json").write_text(json.dumps(pending))
+        (hermes_home / ".update_pending.json").write_text(orjson.dumps(pending).decode('utf-8'))
         (hermes_home / ".update_output.txt").write_text(
             "\x1b[32m✓ Code updated!\x1b[0m\n\x1b[1mDone\x1b[0m"
         )
@@ -528,7 +693,7 @@ class TestSendUpdateNotification:
         hermes_home.mkdir()
 
         pending = {"platform": "telegram", "chat_id": "111", "user_id": "222"}
-        (hermes_home / ".update_pending.json").write_text(json.dumps(pending))
+        (hermes_home / ".update_pending.json").write_text(orjson.dumps(pending).decode('utf-8'))
         (hermes_home / ".update_output.txt").write_text("x" * 5000)
         (hermes_home / ".update_exit_code").write_text("0")
 
@@ -552,7 +717,7 @@ class TestSendUpdateNotification:
         hermes_home.mkdir()
 
         pending = {"platform": "telegram", "chat_id": "111", "user_id": "222"}
-        (hermes_home / ".update_pending.json").write_text(json.dumps(pending))
+        (hermes_home / ".update_pending.json").write_text(orjson.dumps(pending).decode('utf-8'))
         (hermes_home / ".update_output.txt").write_text("Traceback: boom")
         (hermes_home / ".update_exit_code").write_text("1")
 
@@ -575,7 +740,7 @@ class TestSendUpdateNotification:
         hermes_home.mkdir()
 
         pending = {"platform": "telegram", "chat_id": "111", "user_id": "222"}
-        (hermes_home / ".update_pending.json").write_text(json.dumps(pending))
+        (hermes_home / ".update_pending.json").write_text(orjson.dumps(pending).decode('utf-8'))
         # No .update_output.txt created
         (hermes_home / ".update_exit_code").write_text("0")
 
@@ -598,9 +763,9 @@ class TestSendUpdateNotification:
         pending_path = hermes_home / ".update_pending.json"
         output_path = hermes_home / ".update_output.txt"
         exit_code_path = hermes_home / ".update_exit_code"
-        pending_path.write_text(json.dumps({
+        pending_path.write_text(orjson.dumps({
             "platform": "telegram", "chat_id": "111", "user_id": "222",
-        }))
+        }).decode('utf-8'))
         output_path.write_text("✓ Done")
         exit_code_path.write_text("0")
 
@@ -624,9 +789,9 @@ class TestSendUpdateNotification:
         pending_path = hermes_home / ".update_pending.json"
         output_path = hermes_home / ".update_output.txt"
         exit_code_path = hermes_home / ".update_exit_code"
-        pending_path.write_text(json.dumps({
+        pending_path.write_text(orjson.dumps({
             "platform": "telegram", "chat_id": "111", "user_id": "222",
-        }))
+        }).decode('utf-8'))
         output_path.write_text("✓ Done")
         exit_code_path.write_text("0")
 
@@ -677,7 +842,7 @@ class TestSendUpdateNotification:
         pending_path = hermes_home / ".update_pending.json"
         output_path = hermes_home / ".update_output.txt"
         exit_code_path = hermes_home / ".update_exit_code"
-        pending_path.write_text(json.dumps(pending))
+        pending_path.write_text(orjson.dumps(pending).decode('utf-8'))
         output_path.write_text("Done")
         exit_code_path.write_text("0")
 
@@ -715,7 +880,7 @@ class TestSendUpdateNotification:
         pending_path = hermes_home / ".update_pending.json"
         output_path = hermes_home / ".update_output.txt"
         exit_code_path = hermes_home / ".update_exit_code"
-        pending_path.write_text(json.dumps(pending))
+        pending_path.write_text(orjson.dumps(pending).decode('utf-8'))
         output_path.write_text("✓ Update complete!")
         exit_code_path.write_text("0")
 
