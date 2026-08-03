@@ -1113,7 +1113,10 @@ def _load_auth_store(auth_file: Optional[Path] = None) -> Dict[str, Any]:
         return {"version": AUTH_STORE_VERSION, "providers": {}}
 
     try:
-        raw = orjson.loads(auth_file.read_text())
+        # JSON is UTF-8 by definition. Reading bytes avoids decoding with the
+        # Windows system locale (often GBK), which quarantined valid stores
+        # containing non-ASCII provider labels as corrupt.
+        raw = orjson.loads(auth_file.read_bytes())
     except Exception as exc:
         corrupt_path = auth_file.with_suffix(".json.corrupt")
         try:
