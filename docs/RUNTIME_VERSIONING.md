@@ -43,7 +43,7 @@ ship `0.14.0-cn.2`, `0.14.0-cn.3`, and so on. When the kernel moves to
 Every release asset set includes one manifest per platform at:
 
 ```text
-https://ai.fengchiyun.com/downloads/Hermes-CN-Core/runtime/stable/stable-<platform>-<arch>.json
+https://huanxing.ai/downloads/Hermes-CN-Core/runtime/stable/stable-<platform>-<arch>.json
 ```
 
 The manifest is intentionally flat so GitHub Releases can host it directly.
@@ -60,7 +60,7 @@ must reject anything that is not `schemaVersion: 2`.
   "runtimeRevision": 1,
   "platform": "darwin",
   "arch": "arm64",
-  "artifactUrl": "https://ai.fengchiyun.com/downloads/Hermes-CN-Core/runtime/releases/0.14.0-cn.1/hermes-agent-cn-runtime-darwin-arm64.zip",
+  "artifactUrl": "https://huanxing.ai/downloads/Hermes-CN-Core/runtime/releases/0.14.0-cn.1/hermes-agent-cn-runtime-darwin-arm64.zip",
   "sha256": "...",
   "signature": "...",
   "sourceRepo": "Eynzof/hermes-agent-cn",
