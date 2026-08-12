@@ -55,7 +55,7 @@ permissions:
   contents: write  # needed to create the Release + upload assets
 
 env:
-  RUNTIME_UPDATE_FEED_BASE_URL: https://ai.fengchiyun.com/downloads/Hermes-CN-Core/runtime
+  RUNTIME_UPDATE_FEED_BASE_URL: https://huanxing.ai/downloads/Hermes-CN-Core/runtime
 
 jobs:
   build:
