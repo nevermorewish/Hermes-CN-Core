@@ -3,8 +3,9 @@
 
 Salvaged with PR #36998 (@antydizajn): section 3 folds ``providers:`` entries
 that share (api_url, credential, api_mode, extra_headers) into one picker row,
-mirroring section 4's grouping for ``custom_providers:``. These are invariant
-tests — grouping identity, header-routed separation, list-of-dict model
+mirroring section 4's grouping for ``custom_providers:``. An explicit
+``provider_key`` preserves routing identity. These are invariant tests —
+grouping identity, identity/header-routed separation, list-of-dict model
 declarations, and display-only RID stripping.
 """
 
@@ -78,6 +79,37 @@ def test_different_extra_headers_keep_distinct_rows(monkeypatch):
         },
     }))
     assert len(rows) == 2
+
+
+def test_explicit_provider_keys_keep_same_endpoint_models_distinct(monkeypatch):
+    """Stable provider identities must not inherit the first row's name.
+
+    Desktop-managed enterprise models share one relay URL and credential but
+    use provider_key for exact model-to-provider round trips.
+    """
+    rows = _user_rows(_providers(monkeypatch, {
+        "custom:team-model-a": {
+            "provider_key": "custom:team-model-a",
+            "name": "team-model-a",
+            "base_url": "https://team.example.com/v1",
+            "api_key": "shared-token",
+            "api_mode": "openai_chat",
+            "model": "opaque-model-a",
+        },
+        "custom:team-model-b": {
+            "provider_key": "custom:team-model-b",
+            "name": "team-model-b",
+            "base_url": "https://team.example.com/v1",
+            "api_key": "shared-token",
+            "api_mode": "openai_chat",
+            "model": "opaque-model-b",
+        },
+    }))
+
+    assert [(row["slug"], row["name"], row["models"]) for row in rows] == [
+        ("custom:team-model-a", "team-model-a", ["opaque-model-a"]),
+        ("custom:team-model-b", "team-model-b", ["opaque-model-b"]),
+    ]
 
 
 class TestFormatModelForDisplay:

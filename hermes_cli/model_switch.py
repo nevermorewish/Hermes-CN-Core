@@ -2765,9 +2765,12 @@ def list_authenticated_providers(
     # and one "custom:openrouter" from section 4, both labelled identically.
     _section3_emitted_pairs: set = set()
     if user_providers and isinstance(user_providers, dict):
-        # Group ``providers:`` entries by (api_url, key_env, api_mode) so that
+        # Group ``providers:`` entries by endpoint identity so that
         # multiple keyed providers pointing at the same endpoint with the
         # same credential and wire-protocol collapse into one picker row.
+        # An explicit provider_key is a stable routing identity, so entries
+        # with different provider keys must remain distinct even when their
+        # endpoint and credentials are shared.
         # Mirrors section-4's grouping for ``custom_providers:`` lists.
         # Concrete case: a Palantir Foundry Anthropic-proxy with two
         # configured models (claude-4.6 + claude-4.7) — both share the same
@@ -2819,7 +2822,14 @@ def list_authenticated_providers(
             # URL, routed by header) and must keep distinct picker rows.
             entry_extra_headers = _extra_headers_from_config(ep_cfg)
             headers_identity = tuple(sorted(entry_extra_headers.items()))
-            group_key = (api_url_norm, credential_identity, api_mode, headers_identity)
+            provider_identity = str(ep_cfg.get("provider_key", "") or "").strip().lower()
+            group_key = (
+                api_url_norm,
+                credential_identity,
+                api_mode,
+                headers_identity,
+                provider_identity,
+            )
 
             # ``default_model`` is the legacy key; ``model`` matches what
             # custom_providers entries use, so accept either.

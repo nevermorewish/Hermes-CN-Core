@@ -1030,3 +1030,15 @@ Windows platform now requires PowerShell 7 (`pwsh`) or Windows PowerShell (syste
 **Tested.** `tests/tools/test_shell_resolution.py` (auto→bash wins / auto→pwsh fallback / explicit branches unchanged / `TestBuildBashBackgroundScript`), `tests/tools/test_terminal_dynamic_description.py` (explicit bash → `"bash"`, auto git-bash → `"bash"`, unknown → auto, Windows git-bash description sentence), `tests/tools/test_process_registry.py` (bash background spawn uses `bash -lc` wrapper, no PowerShell flags; PTY variant), `tests/agent/test_prompt_builder.py` (auto + git-bash → bash hint), `tests/tools/test_find_bash_optional_probe.py` (new — `_find_bash(raise_if_missing=False)` → `None` instead of raising, ASLR/not-found/broken-bash paths; the dev-020-only `test_local_git_bash_port.py` does not exist on this base). Full `tests/tools` + `tests/agent` suites pass; `ruff check .` clean.
 
 **Should we upstream?** The git-bash-first *default* is a deliberate fork divergence (upstream's Windows shell default is PowerShell-first, P-016/P-019/P-050). The non-raising `_find_bash` probe and the shell-aware background/PTY spawn are generic improvements suitable for upstream.
+
+### P-062: Preserve explicit provider identities in the model picker
+
+**Symptom.** Desktop-managed Team models that shared one relay URL, token, protocol, and headers collapsed into one `model.options` row. The row inherited the first provider's slug and display name, so selecting `teamkimi-k3` displayed `teamtestgpt-5.6-sol` and persisted the wrong provider identity even though the opaque model id remained Kimi's.
+
+**Root cause.** Section 3 of `list_authenticated_providers()` grouped `providers:` entries only by endpoint and credential identity. It ignored the explicit `provider_key` that the Desktop registry writes specifically to guarantee exact provider round trips.
+
+**Fix.** Include normalized `provider_key` in the section-3 grouping key. Entries without an explicit key retain the existing same-endpoint collapse behavior; entries with distinct stable keys remain separate.
+
+**Tested.** `tests/hermes_cli/test_provider_section3_grouping.py` covers both invariants: ordinary same-endpoint entries still fold, while two same-endpoint Team-shaped entries with distinct provider keys preserve their own slug, name, and model list.
+
+**Should we upstream?** Yes. Treating an explicit provider identity as load-bearing is generic and preserves the opt-in grouping semantics for entries that omit it.
